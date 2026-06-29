@@ -1,0 +1,660 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><style>
+@page {
+  size: A4;
+}
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: #1f2430; font-size: 10.4pt; line-height: 1.5; margin: 0;
+}
+h1,h2,h3,h4 { color: #14101f; line-height: 1.2; }
+h2 { font-size: 18pt; margin: 0 0 4px; padding-bottom: 6px; border-bottom: 3px solid #6d4aff; }
+h3 { font-size: 13pt; margin: 18px 0 4px; color: #4a2fd0; }
+h4 { font-size: 11pt; margin: 12px 0 2px; color: #1f2430; }
+p { margin: 6px 0; }
+ul,ol { margin: 6px 0 6px 0; padding-left: 20px; }
+li { margin: 3px 0; }
+code { font-family: "SF Mono","Cascadia Code",Consolas,monospace; font-size: 9pt;
+  background: #f3f1fb; color: #4a2fd0; padding: 1px 4px; border-radius: 3px; }
+pre { background: #1d1b2e; color: #e8e6f5; padding: 12px 14px; border-radius: 7px;
+  font-family: "SF Mono","Cascadia Code",Consolas,monospace; font-size: 8.4pt;
+  line-height: 1.45; overflow: hidden; white-space: pre-wrap; margin: 8px 0; }
+pre .c { color: #8a86b8; }
+pre .k { color: #c4b5fd; }
+pre .s { color: #86efac; }
+.section { page-break-before: always; }
+.lead { font-size: 11pt; color: #3a3550; }
+.fig { margin: 10px 0 4px; page-break-inside: avoid; text-align: center; }
+.fig svg { max-width: 100%; height: auto; max-height: 70mm; }
+.cap { font-size: 8.6pt; color: #6b6786; margin-top: 4px; font-style: italic; text-align: center; }
+.callout { border-left: 4px solid #ff9900; background: #fff8ef; padding: 9px 13px;
+  border-radius: 0 6px 6px 0; margin: 10px 0; page-break-inside: avoid; }
+.callout.warn { border-left-color: #e11d48; background: #fff1f3; }
+.callout.tip  { border-left-color: #059669; background: #ecfdf5; }
+.callout .t { font-weight: 700; font-size: 9.4pt; text-transform: uppercase;
+  letter-spacing: .5px; display:block; margin-bottom: 2px; }
+.callout.warn .t { color:#be123c; } .callout.tip .t { color:#047857; } .callout .t { color:#b45309; }
+table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 9pt; }
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th { background: #2a2440; color: #fff; text-align: left; padding: 5px 9px; font-size: 8.8pt; }
+td { border-bottom: 1px solid #e4e1f0; padding: 4px 9px; vertical-align: top; }
+tr:nth-child(even) td { background: #faf9fe; }
+.pill { display:inline-block; font-size:8pt; font-weight:700; padding:1px 7px;
+  border-radius: 10px; vertical-align: middle; }
+.pill.sys{background:#ede9fe;color:#5b3df5;} .pill.aws{background:#fff4e6;color:#cc7a00;}
+.pill.k8s{background:#e3edfd;color:#1f5fd0;} .pill.sso{background:#d1fae5;color:#059669;}
+
+/* SVG shared classes */
+svg text { font-family: -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+.s-sys  { fill:#ede9fe; stroke:#6d4aff; stroke-width:1.6; }
+.s-code { fill:#e0f2fe; stroke:#0284c7; stroke-width:1.6; }
+.s-aws  { fill:#fff4e6; stroke:#ff9900; stroke-width:1.6; }
+.s-run  { fill:#fef3c7; stroke:#f59e0b; stroke-width:1.6; }
+.s-sso  { fill:#d1fae5; stroke:#059669; stroke-width:1.6; }
+.s-db   { fill:#f3e8ff; stroke:#9333ea; stroke-width:1.6; }
+.s-user { fill:#f1f5f9; stroke:#64748b; stroke-width:1.6; }
+.s-grp  { fill:none; stroke:#b8b3cf; stroke-width:1.3; stroke-dasharray:5 4; }
+.t-ttl  { font-weight:700; fill:#14101f; }
+.t-sub  { fill:#5b5670; }
+.t-wht  { fill:#fff; font-weight:700; }
+.t-grp  { fill:#8a86a8; font-weight:700; letter-spacing:.5px; }
+.edge   { stroke:#6b6786; stroke-width:1.6; fill:none; }
+.edge-d { stroke:#6b6786; stroke-width:1.6; fill:none; stroke-dasharray:4 3; }
+.elbl   { fill:#4a4660; font-size:9px; }
+.cover-bg { fill:#16122a; }
+</style></head><body>
+<div style="position:relative;height:255mm;page-break-after:always;">
+  <svg viewBox="0 0 600 850" preserveAspectRatio="none"
+       style="position:absolute;inset:0;width:100%;height:100%;z-index:-1;">
+    <rect width="600" height="850" class="cover-bg"/>
+    <circle cx="500" cy="120" r="220" fill="#2a1f5e" opacity="0.55"/>
+    <circle cx="90" cy="730" r="180" fill="#3a2a7a" opacity="0.45"/>
+  </svg>
+  <div style="padding:46mm 20mm 0;color:#fff;">
+    <div style="font-size:11pt;letter-spacing:3px;color:#b9a8ff;font-weight:700;">
+      AIOPS PLATFORM · ENGINEERING GUIDE</div>
+    <div style="font-size:33pt;font-weight:800;line-height:1.1;margin-top:14px;color:#fff;">
+      Deploying Dagster<br/>on Amazon EKS</div>
+    <div style="font-size:15pt;color:#d9d2ff;margin-top:14px;font-weight:500;">
+      Helm · Kubernetes · Run Execution · Keycloak SSO</div>
+    <div style="height:2px;background:#6d4aff;width:120px;margin:26px 0;"></div>
+    <div style="font-size:11pt;color:#cfc8ee;max-width:135mm;line-height:1.6;">
+      A hands-on guide written for engineers new to Kubernetes and Dagster.
+      It explains how the pieces fit together, why each choice is made, and the
+      exact order to deploy them — from an empty cluster to a secured,
+      multi-domain Dagster running behind single sign-on.
+    </div>
+  </div>
+  <div style="position:absolute;bottom:24mm;left:20mm;color:#9b93c4;font-size:9pt;">
+    Self-hosted Dagster OSS &nbsp;·&nbsp; multi-code-location &nbsp;·&nbsp; production target<br/>
+    <span style="color:#6f6a92;">Internal teaching document — adapt values to your environment before use.</span>
+  </div>
+</div><div class="section" style="page-break-before:auto;"><h2>Contents</h2><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">1</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">The big picture — what we are building</span><span style="color:#7a7596;font-size:9.6pt;"> — and why it looks this way</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">2</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">Foundations</span><span style="color:#7a7596;font-size:9.6pt;"> — Kubernetes / EKS, Helm, and Dagster in plain language</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">3</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">Dagster's architecture</span><span style="color:#7a7596;font-size:9.6pt;"> — two Helm charts, system vs. code</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">4</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">The EKS substrate</span><span style="color:#7a7596;font-size:9.6pt;"> — RDS, S3, ECR, identity — the AWS wiring</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">5</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">The run & execution model</span><span style="color:#7a7596;font-size:9.6pt;"> — how a schedule becomes a pod, and the cleanup trap</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">6</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">Single sign-on with Keycloak</span><span style="color:#7a7596;font-size:9.6pt;"> — auth at the edge with oauth2-proxy</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">7</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">Version discipline</span><span style="color:#7a7596;font-size:9.6pt;"> — the coupling rule that breaks deployments</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">8</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">Step-by-step deployment</span><span style="color:#7a7596;font-size:9.6pt;"> — the runbook, in order</span></div></div><div style="display:flex;align-items:baseline;margin:9px 0;page-break-inside:avoid;"><div style="width:34px;font-size:16pt;font-weight:800;color:#6d4aff;">9</div><div><span style="font-size:12pt;font-weight:700;color:#14101f;">Gotchas & pre-flight checklist</span><span style="color:#7a7596;font-size:9.6pt;"> — what bites juniors first</span></div></div></div>
+<div class="section"><h2>1 · The big picture</h2>
+<p class="lead">We are taking a Dagster deployment that runs on a laptop and moving it onto
+Amazon EKS so it can run securely, survive restarts, scale on demand, and be used by a whole team
+behind company login.</p>
+<p>Before any detail, hold this one picture in your head. A user opens the Dagster UI in a browser.
+The request lands on a cluster, but first passes through a single-sign-on gate. Inside the cluster,
+two small "system" services run all the time, and each data domain runs as its own isolated service.
+Heavy work happens in short-lived pods that appear, do their job, and disappear. Everything durable —
+the database, the data files, the container images, the secrets — lives in AWS managed services
+outside the cluster, so the cluster itself stays disposable.</p>
+<div class="fig">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ov" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<rect x="14" y="120" width="92" height="56" rx="9" class="s-user"/>
+<text x="60" y="143" text-anchor="middle" font-size="11" class="t-ttl">User</text>
+<text x="60" y="159" text-anchor="middle" font-size="9" class="t-sub">browser</text>
+
+<rect x="150" y="40" width="430" height="220" rx="12" class="s-grp"/>
+<text x="165" y="34" font-size="10" class="t-grp">EKS CLUSTER (in your VPC)</text>
+
+<rect x="170" y="112" width="120" height="40" rx="8" class="s-sso"/>
+<text x="230" y="130" text-anchor="middle" font-size="10" class="t-ttl">Ingress + SSO</text>
+<text x="230" y="144" text-anchor="middle" font-size="8.5" class="t-sub">ALB · oauth2-proxy</text>
+
+<rect x="330" y="58" width="110" height="38" rx="8" class="s-sys"/>
+<text x="385" y="74" text-anchor="middle" font-size="10" class="t-ttl">Webserver</text>
+<text x="385" y="88" text-anchor="middle" font-size="8.5" class="t-sub">UI + GraphQL</text>
+
+<rect x="330" y="168" width="110" height="38" rx="8" class="s-sys"/>
+<text x="385" y="184" text-anchor="middle" font-size="10" class="t-ttl">Daemon</text>
+<text x="385" y="198" text-anchor="middle" font-size="8.5" class="t-sub">schedules+queue</text>
+
+<rect x="468" y="58" width="98" height="34" rx="7" class="s-code"/>
+<text x="517" y="79" text-anchor="middle" font-size="9.5" class="t-ttl">ingestion</text>
+<rect x="468" y="100" width="98" height="34" rx="7" class="s-code"/>
+<text x="517" y="121" text-anchor="middle" font-size="9.5" class="t-ttl">data_science</text>
+<rect x="468" y="156" width="98" height="50" rx="7" class="s-run"/>
+<text x="517" y="176" text-anchor="middle" font-size="9.5" class="t-ttl">run pods</text>
+<text x="517" y="190" text-anchor="middle" font-size="8" class="t-sub">ephemeral</text>
+
+<rect x="620" y="40" width="126" height="220" rx="12" class="s-grp"/>
+<text x="635" y="34" font-size="10" class="t-grp">AWS MANAGED</text>
+<rect x="634" y="58" width="98" height="34" rx="7" class="s-aws"/>
+<text x="683" y="79" text-anchor="middle" font-size="9.5" class="t-ttl">RDS</text>
+<rect x="634" y="100" width="98" height="34" rx="7" class="s-aws"/>
+<text x="683" y="121" text-anchor="middle" font-size="9.5" class="t-ttl">S3</text>
+<rect x="634" y="142" width="98" height="34" rx="7" class="s-aws"/>
+<text x="683" y="163" text-anchor="middle" font-size="9.5" class="t-ttl">ECR</text>
+<rect x="634" y="184" width="98" height="40" rx="7" class="s-aws"/>
+<text x="683" y="200" text-anchor="middle" font-size="9" class="t-ttl">Secrets</text>
+<text x="683" y="213" text-anchor="middle" font-size="8" class="t-sub">Manager</text>
+
+<path d="M106 148 L168 132" class="edge" marker-end="url(#ov)"/>
+<path d="M290 126 L328 90" class="edge" marker-end="url(#ov)"/>
+<path d="M290 138 L328 184" class="edge" marker-end="url(#ov)"/>
+<path d="M440 77 L466 75" class="edge" marker-end="url(#ov)"/>
+<path d="M440 187 L466 181" class="edge" marker-end="url(#ov)"/>
+<path d="M566 75 L632 75" class="edge-d" marker-end="url(#ov)"/>
+<path d="M566 181 L632 117" class="edge-d" marker-end="url(#ov)"/>
+<text x="588" y="70" font-size="8" class="elbl">images</text>
+<text x="588" y="150" font-size="8" class="elbl">data</text>
+</svg></div><div class="cap">Figure 1 — The whole system on one page. Read it left to right: user → SSO → cluster → AWS managed services.</div>
+<p>The rest of this guide unpacks each box in that figure: what it is, why it is there, and how to
+deploy it. If you ever feel lost, come back to Figure 1.</p>
+<div class="callout tip"><span class="t">Mental model</span>
+The cluster is <b>cattle, not pets</b>. Nothing important is stored inside it. If the whole cluster
+vanished, you could rebuild it and reconnect to the same database, files, and images. That principle
+drives almost every decision below.</div>
+</div>
+<div class="section"><h2>2 · Foundations</h2>
+<p class="lead">Three technologies, in plain language. If you already know them, skip to Section 3.</p>
+
+<h3>Kubernetes and EKS</h3>
+<p><b>Kubernetes</b> (often "K8s") is software that runs and supervises containers across a fleet of
+machines. You describe the desired state — "I want two copies of this service running" — and
+Kubernetes makes reality match, restarting things that crash and rescheduling them when a machine
+dies. A running container is wrapped in a <b>Pod</b> (the smallest unit K8s manages). A
+<b>Deployment</b> keeps a set of identical pods alive. A <b>Service</b> gives those pods a stable
+internal address. A <b>Job</b> runs a pod until a task completes, then stops.</p>
+<p><b>EKS</b> (Elastic Kubernetes Service) is AWS running the Kubernetes control plane for you, so you
+don't babysit the cluster's brain. You still bring the worker machines (nodes) where your pods run.
+<b>Karpenter</b> is an add-on that adds and removes nodes automatically based on demand — important
+later, because our heavy work is bursty.</p>
+
+<h3>Helm</h3>
+<p>Writing Kubernetes manifests by hand is tedious and error-prone. <b>Helm</b> is a package manager:
+a <b>chart</b> is a bundle of manifest <i>templates</i>, and a <b>values.yaml</b> file fills in the
+blanks (which image, how much memory, which database). Helm combines them into final manifests and
+applies them in one command. You install or upgrade a whole application as a single named
+<b>release</b>.</p>
+<div class="fig">
+<svg viewBox="0 0 760 190" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="hl" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<rect x="20" y="60" width="150" height="70" rx="9" class="s-sys"/>
+<text x="95" y="88" text-anchor="middle" font-size="11" class="t-ttl">Helm Chart</text>
+<text x="95" y="105" text-anchor="middle" font-size="8.6" class="t-sub">templates +</text>
+<text x="95" y="117" text-anchor="middle" font-size="8.6" class="t-sub">default values</text>
+
+<rect x="210" y="60" width="150" height="70" rx="9" class="s-code"/>
+<text x="285" y="88" text-anchor="middle" font-size="11" class="t-ttl">values.yaml</text>
+<text x="285" y="105" text-anchor="middle" font-size="8.6" class="t-sub">your settings</text>
+<text x="285" y="117" text-anchor="middle" font-size="8.6" class="t-sub">(images, db, S3...)</text>
+
+<rect x="400" y="44" width="150" height="102" rx="9" class="s-user"/>
+<text x="475" y="70" text-anchor="middle" font-size="10.5" class="t-ttl">helm</text>
+<text x="475" y="84" text-anchor="middle" font-size="8.6" class="t-sub">renders templates</text>
+<text x="475" y="96" text-anchor="middle" font-size="8.6" class="t-sub">+ values into</text>
+<text x="475" y="108" text-anchor="middle" font-size="8.6" class="t-sub">full K8s manifests</text>
+
+<rect x="590" y="60" width="150" height="70" rx="9" class="s-grp" fill="#f6f5fb"/>
+<text x="665" y="84" text-anchor="middle" font-size="10.5" class="t-ttl">Kubernetes</text>
+<text x="665" y="100" text-anchor="middle" font-size="8.6" class="t-sub">Deployments,</text>
+<text x="665" y="112" text-anchor="middle" font-size="8.6" class="t-sub">Services, Pods</text>
+
+<path d="M170 95 L208 95" class="edge" marker-end="url(#hl)"/>
+<path d="M360 95 L398 95" class="edge" marker-end="url(#hl)"/>
+<path d="M550 95 L588 95" class="edge" marker-end="url(#hl)"/>
+<text x="475" y="160" text-anchor="middle" font-size="8.4" class="elbl">one command: helm upgrade --install</text>
+</svg></div><div class="cap">Figure 2 — Helm = templates + your values, rendered into real Kubernetes objects by one command.</div>
+
+<h3>Dagster</h3>
+<p><b>Dagster</b> is a data orchestrator: it runs your data pipelines, tracks the <b>assets</b> they
+produce (tables, files, models), and shows their dependencies and run history in a UI. You write
+Python that declares assets and their upstream dependencies; Dagster figures out the order and the
+schedule. The key idea for deployment: your pipeline code is packaged as one or more
+<b>code locations</b> (also called workspaces), and Dagster's system services load that code and
+launch runs from it.</p>
+<div class="callout"><span class="t">Why this matters</span>
+Dagster cleanly separates <b>system</b> (the always-on UI and scheduler) from <b>your code</b>
+(the pipelines). That separation is the single most important thing to understand before deploying —
+it is why there are two Helm charts, covered next.</div>
+</div>
+<div class="section"><h2>3 · Dagster's architecture on Kubernetes</h2>
+<p class="lead">Dagster ships <b>two</b> Helm charts. Knowing which piece lives where removes most of
+the confusion juniors hit.</p>
+<div class="fig">
+<svg viewBox="0 0 760 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="dg" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<rect x="20" y="40" width="350" height="180" rx="12" class="s-grp"/>
+<text x="34" y="34" font-size="10" class="t-grp">CHART 1:  dagster/dagster  (SYSTEM)</text>
+<rect x="44" y="66" width="140" height="48" rx="8" class="s-sys"/>
+<text x="114" y="86" text-anchor="middle" font-size="10.5" class="t-ttl">Webserver</text>
+<text x="114" y="101" text-anchor="middle" font-size="8.4" class="t-sub">serves UI + GraphQL</text>
+<rect x="44" y="142" width="140" height="56" rx="8" class="s-sys"/>
+<text x="114" y="163" text-anchor="middle" font-size="10.5" class="t-ttl">Daemon</text>
+<text x="114" y="178" text-anchor="middle" font-size="8.4" class="t-sub">ticks schedules,</text>
+<text x="114" y="189" text-anchor="middle" font-size="8.4" class="t-sub">runs the queue</text>
+<rect x="214" y="92" width="132" height="120" rx="9" class="s-grp" fill="#f6f5fb"/>
+<text x="280" y="84" text-anchor="middle" font-size="9" class="t-grp">no user code here</text>
+<text x="280" y="140" text-anchor="middle" font-size="8.8" class="t-sub">talk to code</text>
+<text x="280" y="153" text-anchor="middle" font-size="8.8" class="t-sub">locations over</text>
+<text x="280" y="166" text-anchor="middle" font-size="11" class="t-ttl">gRPC</text>
+
+<rect x="410" y="40" width="330" height="180" rx="12" class="s-grp"/>
+<text x="424" y="34" font-size="10" class="t-grp">CHART 2:  dagster-user-deployments  (CODE)</text>
+<rect x="436" y="66" width="128" height="44" rx="8" class="s-code"/>
+<text x="500" y="84" text-anchor="middle" font-size="10" class="t-ttl">ingestion</text>
+<text x="500" y="99" text-anchor="middle" font-size="8" class="t-sub">own image + venv</text>
+<rect x="436" y="120" width="128" height="44" rx="8" class="s-code"/>
+<text x="500" y="138" text-anchor="middle" font-size="10" class="t-ttl">data_science</text>
+<text x="500" y="153" text-anchor="middle" font-size="8" class="t-sub">own image + venv</text>
+<rect x="436" y="174" width="128" height="32" rx="8" class="s-code" stroke-dasharray="4 3"/>
+<text x="500" y="194" text-anchor="middle" font-size="9.5" class="t-ttl">... more domains</text>
+<text x="600" y="120" font-size="9" class="t-sub">each = its own</text>
+<text x="600" y="133" font-size="9" class="t-sub">K8s Deployment</text>
+<text x="600" y="146" font-size="9" class="t-sub">+ Service running</text>
+<text x="600" y="159" font-size="9" class="t-sub">a gRPC server</text>
+
+<rect x="150" y="258" width="180" height="54" rx="9" class="s-db"/>
+<text x="240" y="280" text-anchor="middle" font-size="10.5" class="t-ttl">Postgres (RDS)</text>
+<text x="240" y="296" text-anchor="middle" font-size="8.4" class="t-sub">runs, event logs, ticks</text>
+<rect x="430" y="258" width="180" height="54" rx="9" class="s-run"/>
+<text x="520" y="280" text-anchor="middle" font-size="10.5" class="t-ttl">Run pods</text>
+<text x="520" y="296" text-anchor="middle" font-size="8.4" class="t-sub">spawned per run, ephemeral</text>
+
+<path d="M346 150 L434 110" class="edge" marker-end="url(#dg)"/>
+<path d="M346 160 L434 142" class="edge" marker-end="url(#dg)"/>
+<text x="360" y="128" font-size="8" class="elbl">gRPC</text>
+<path d="M150 200 C150 240 200 245 220 256" class="edge" marker-end="url(#dg)"/>
+<path d="M500 164 C500 210 510 230 519 256" class="edge" marker-end="url(#dg)"/>
+<text x="120" y="240" font-size="8" class="elbl">read/write</text>
+<text x="525" y="225" font-size="8" class="elbl">launches</text>
+</svg></div><div class="cap">Figure 3 — Two charts. System services hold no pipeline code; they reach each code location over gRPC.</div>
+
+<h3>Chart 1 — the system (<code>dagster/dagster</code>)</h3>
+<p>This chart deploys two long-running services:</p>
+<ul>
+<li><b>Webserver</b> — serves the UI and the GraphQL API the UI talks to.</li>
+<li><b>Daemon</b> — the background engine: it ticks schedules and sensors, and works through the
+run queue, deciding what to launch and when.</li>
+</ul>
+<p>Crucially, <b>neither contains your pipeline code</b>. They discover and talk to your code over a
+network protocol called <b>gRPC</b>. The chart can also deploy a Postgres pod for convenience — we
+will turn that off and use a managed database instead (Section 4).</p>
+
+<h3>Chart 2 — the code (<code>dagster/dagster-user-deployments</code>)</h3>
+<p>Each data domain — <code>ingestion</code>, <code>data_science</code>, and so on — becomes one
+entry here. For each entry, the chart creates a Kubernetes Deployment and Service that runs a small
+gRPC server hosting that domain's code. Each runs in <b>its own image with its own Python
+environment</b>, fully isolated from the others. A crash or a heavy dependency in one domain cannot
+affect another, and you can redeploy one domain without touching the rest.</p>
+
+<div class="callout tip"><span class="t">Why two separate charts (two releases)</span>
+Running system and code as separate Helm releases means you can ship a new version of a pipeline
+many times a day without ever restarting the UI or scheduler. The platform team owns the system
+release; each domain team owns its own code release. This is the recommended production pattern.</div>
+
+<h3>Where state lives</h3>
+<p>Two durable stores sit beneath everything. <b>Postgres</b> holds all metadata — every run, every
+event log line, every schedule tick. <b>Run pods</b> are spawned per run to do the actual work and
+then disappear. The next two sections are about doing both of these <i>correctly on AWS</i>, which
+the vanilla tutorial does not.</p>
+</div>
+<div class="section"><h2>4 · The EKS substrate (the AWS wiring)</h2>
+<p class="lead">The basic Helm tutorial uses an in-cluster database and pasted-in AWS keys. Both are
+fine for a demo and wrong for production. Here is what a real EKS deployment uses instead.</p>
+<div class="fig">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ek" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<rect x="16" y="30" width="470" height="288" rx="12" class="s-grp"/>
+<text x="30" y="24" font-size="10" class="t-grp">EKS CLUSTER  (VPC, private subnets)</text>
+
+<rect x="34" y="48" width="436" height="96" rx="9" fill="#faf9fe" stroke="#d9d4ec"/>
+<text x="46" y="64" font-size="9" class="t-grp">ON-DEMAND NODES (always on)</text>
+<rect x="50" y="74" width="120" height="56" rx="7" class="s-sys"/>
+<text x="110" y="98" text-anchor="middle" font-size="9.5" class="t-ttl">webserver</text>
+<text x="110" y="113" text-anchor="middle" font-size="8" class="t-sub">+ daemon</text>
+<rect x="186" y="74" width="124" height="56" rx="7" class="s-code"/>
+<text x="248" y="98" text-anchor="middle" font-size="9.5" class="t-ttl">code locations</text>
+<text x="248" y="113" text-anchor="middle" font-size="8" class="t-sub">gRPC servers</text>
+<rect x="326" y="74" width="128" height="56" rx="7" class="s-sso"/>
+<text x="390" y="98" text-anchor="middle" font-size="9.5" class="t-ttl">ingress + auth</text>
+<text x="390" y="113" text-anchor="middle" font-size="8" class="t-sub">ALB · oauth2-proxy</text>
+
+<rect x="34" y="156" width="436" height="86" rx="9" fill="#fffaf2" stroke="#f3d9ab"/>
+<text x="46" y="172" font-size="9" class="t-grp">KARPENTER NODES (scale to zero between bursts)</text>
+<rect x="50" y="182" width="92" height="48" rx="7" class="s-run"/>
+<text x="96" y="210" text-anchor="middle" font-size="9" class="t-ttl">run pod</text>
+<rect x="150" y="182" width="92" height="48" rx="7" class="s-run"/>
+<text x="196" y="210" text-anchor="middle" font-size="9" class="t-ttl">run pod</text>
+<rect x="250" y="182" width="92" height="48" rx="7" class="s-run" stroke-dasharray="4 3"/>
+<text x="296" y="210" text-anchor="middle" font-size="9" class="t-ttl">step pod</text>
+<rect x="350" y="182" width="104" height="48" rx="7" class="s-run" stroke-dasharray="4 3"/>
+<text x="402" y="210" text-anchor="middle" font-size="9" class="t-ttl">step pod</text>
+
+<rect x="34" y="256" width="436" height="48" rx="9" fill="#eef7ee" stroke="#bfe0bf"/>
+<text x="46" y="272" font-size="9" class="t-grp">IDENTITY (no static keys!)</text>
+<text x="250" y="289" text-anchor="middle" font-size="9.2" class="t-ttl">IRSA / EKS Pod Identity  →  IAM roles on service accounts</text>
+
+<rect x="512" y="30" width="232" height="288" rx="12" class="s-grp"/>
+<text x="526" y="24" font-size="10" class="t-grp">AWS MANAGED SERVICES</text>
+<rect x="528" y="50" width="200" height="44" rx="8" class="s-aws"/>
+<text x="628" y="68" text-anchor="middle" font-size="10" class="t-ttl">RDS Postgres</text>
+<text x="628" y="83" text-anchor="middle" font-size="8" class="t-sub">metadata store</text>
+<rect x="528" y="104" width="200" height="44" rx="8" class="s-aws"/>
+<text x="628" y="122" text-anchor="middle" font-size="10" class="t-ttl">S3</text>
+<text x="628" y="137" text-anchor="middle" font-size="8" class="t-sub">I/O manager + compute logs</text>
+<rect x="528" y="158" width="200" height="44" rx="8" class="s-aws"/>
+<text x="628" y="176" text-anchor="middle" font-size="10" class="t-ttl">ECR</text>
+<text x="628" y="191" text-anchor="middle" font-size="8" class="t-sub">domain images</text>
+<rect x="528" y="212" width="200" height="44" rx="8" class="s-aws"/>
+<text x="628" y="230" text-anchor="middle" font-size="10" class="t-ttl">Secrets Manager</text>
+<text x="628" y="245" text-anchor="middle" font-size="8" class="t-sub">via External Secrets Operator</text>
+<rect x="528" y="266" width="200" height="38" rx="8" class="s-sso"/>
+<text x="628" y="289" text-anchor="middle" font-size="9.5" class="t-ttl">Keycloak (OIDC)</text>
+
+<path d="M470 100 L526 72" class="edge-d" marker-end="url(#ek)"/>
+<path d="M470 110 L526 126" class="edge-d" marker-end="url(#ek)"/>
+<path d="M454 206 L526 130" class="edge-d" marker-end="url(#ek)"/>
+<path d="M454 100 L526 180" class="edge-d" marker-end="url(#ek)"/>
+<path d="M390 130 L600 284" class="edge-d" marker-end="url(#ek)"/>
+</svg></div><div class="cap">Figure 4 — Durable state and identity live in AWS managed services; the cluster stays disposable.</div>
+
+<h3>Postgres → Amazon RDS</h3>
+<p>Do not use the Postgres pod the chart can create — a database inside the cluster is not safe for
+production data. Point Dagster at a managed <b>RDS</b> (or Aurora) instance and set
+<code>postgresql.enabled=false</code> in the system chart. RDS gives you backups, failover, and the
+performance headroom you will need as metadata grows.</p>
+
+<h3>Object storage → Amazon S3</h3>
+<p>Dagster's <b>I/O manager</b> reads and writes asset values to <b>S3</b>, and compute logs also go
+to S3. This is essential in a multi-domain setup: if <code>data_science</code> consumes an asset
+produced by <code>ingestion</code>, that value passes through shared storage, because the two run in
+separate containers that cannot see each other's local disk.</p>
+
+<h3>Identity → IRSA or EKS Pod Identity (never static keys)</h3>
+<p>The tutorial pastes an <code>AWS_ACCESS_KEY_ID</code> into config. Don't. On EKS, attach an IAM
+role to a Kubernetes <b>service account</b> via <b>IRSA</b> or the newer <b>EKS Pod Identity</b>
+(prefer Pod Identity on a new cluster). Pods then receive AWS permissions automatically, with no
+long-lived secret to leak.</p>
+<div class="callout warn"><span class="t">The #1 EKS-Dagster footgun</span>
+The S3 permission must be granted to <b>three</b> things: each code-location deployment, <b>and the
+run/step pods they launch</b>. The I/O manager reads and writes from inside the ephemeral run worker —
+not the gRPC server. Forget the run-pod role and your assets work in local dev but fail with
+<code>AccessDenied</code> in the cluster. This is the most common first-deploy failure.</div>
+
+<h3>Images → ECR · Secrets → Secrets Manager</h3>
+<p>Build one image per domain, push to <b>ECR</b>, and reference by immutable tag or digest (pull
+access must also reach the run pods). Store secrets — database password, SSO client secret — in
+<b>AWS Secrets Manager</b> and sync them into the cluster with the <b>External Secrets Operator</b>,
+so nothing sensitive lives in <code>values.yaml</code> or Git.</p>
+</div>
+<div class="section"><h2>5 · The run &amp; execution model</h2>
+<p class="lead">This is where Dagster meets Kubernetes most directly — and where an innocent setting
+quietly creates an operational problem at scale.</p>
+<div class="fig">
+<svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="rl" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<rect x="14" y="96" width="104" height="50" rx="8" class="s-sys"/>
+<text x="66" y="116" text-anchor="middle" font-size="9.5" class="t-ttl">Daemon</text>
+<text x="66" y="131" text-anchor="middle" font-size="8" class="t-sub">tick fires</text>
+
+<rect x="150" y="96" width="120" height="50" rx="8" class="s-db"/>
+<text x="210" y="116" text-anchor="middle" font-size="9.5" class="t-ttl">runs table</text>
+<text x="210" y="131" text-anchor="middle" font-size="8" class="t-sub">run queued (RDS)</text>
+
+<rect x="302" y="96" width="130" height="50" rx="8" class="s-sys"/>
+<text x="367" y="113" text-anchor="middle" font-size="9.3" class="t-ttl">K8sRunLauncher</text>
+<text x="367" y="128" text-anchor="middle" font-size="8" class="t-sub">creates a K8s Job</text>
+
+<rect x="464" y="60" width="130" height="54" rx="8" class="s-run"/>
+<text x="529" y="80" text-anchor="middle" font-size="9.5" class="t-ttl">run pod</text>
+<text x="529" y="95" text-anchor="middle" font-size="8" class="t-sub">= the run worker</text>
+<rect x="464" y="128" width="60" height="46" rx="7" class="s-run" stroke-dasharray="4 3"/>
+<text x="494" y="155" text-anchor="middle" font-size="8.4" class="t-ttl">step</text>
+<rect x="534" y="128" width="60" height="46" rx="7" class="s-run" stroke-dasharray="4 3"/>
+<text x="564" y="155" text-anchor="middle" font-size="8.4" class="t-ttl">step</text>
+<text x="529" y="190" text-anchor="middle" font-size="7.8" class="t-sub">(step pods only if k8s_job_executor)</text>
+
+<rect x="630" y="60" width="116" height="44" rx="8" class="s-aws"/>
+<text x="688" y="78" text-anchor="middle" font-size="9.2" class="t-ttl">S3</text>
+<text x="688" y="92" text-anchor="middle" font-size="7.8" class="t-sub">asset I/O</text>
+<rect x="630" y="118" width="116" height="44" rx="8" class="s-db"/>
+<text x="688" y="136" text-anchor="middle" font-size="9.2" class="t-ttl">event_logs</text>
+<text x="688" y="150" text-anchor="middle" font-size="7.8" class="t-sub">written to RDS</text>
+
+<path d="M118 121 L148 121" class="edge" marker-end="url(#rl)"/>
+<path d="M270 121 L300 121" class="edge" marker-end="url(#rl)"/>
+<path d="M432 110 L462 92" class="edge" marker-end="url(#rl)"/>
+<path d="M594 87 L628 84" class="edge" marker-end="url(#rl)"/>
+<path d="M594 100 L628 130" class="edge-d" marker-end="url(#rl)"/>
+
+<rect x="150" y="206" width="444" height="34" rx="8" fill="#fff1f3" stroke="#f3b8c4"/>
+<text x="372" y="227" text-anchor="middle" font-size="8.8" fill="#be123c" font-weight="700">Finished Jobs/pods are NOT auto-deleted — set TTL + run a DB pruning job</text>
+</svg></div><div class="cap">Figure 5 — From schedule tick to finished run. The red bar is the trap most teams hit.</div>
+
+<h3>How a run happens</h3>
+<ol>
+<li>The <b>daemon</b> ticks a schedule and writes a queued run into the Postgres <code>runs</code>
+table.</li>
+<li>The <b>K8sRunLauncher</b> (the default) creates a Kubernetes <b>Job</b> for that run.</li>
+<li>That Job is the <b>run worker</b> pod. It uses the <i>same image</i> as the code location it came
+from, so the pipeline code and dependencies are present.</li>
+<li>If you use the <b>k8s_job_executor</b>, each step of the run launches in its own additional pod.
+With the default in-process executor, the whole run executes inside that single run pod.</li>
+<li>Asset values flow to/from <b>S3</b>; every event is written to <b>Postgres</b>, which is what the
+UI later displays.</li>
+</ol>
+
+<div class="callout warn"><span class="t">The cleanup trap</span>
+Finished run and step Jobs are <b>not</b> deleted automatically — Kubernetes keeps them so you can
+inspect results. At a 5-minute schedule across several domains that is well over a thousand runs a
+day, each leaving objects behind. Two fixes are mandatory: (1) set
+<code>ttlSecondsAfterFinished</code> so Kubernetes garbage-collects finished Jobs, and (2) run a
+Dagster <b>pruning job</b> against Postgres — the built-in retention only trims schedule ticks, not
+the <code>runs</code> and <code>event_logs</code> tables, which otherwise grow without limit.</div>
+
+<h3>Choosing an executor (a real decision)</h3>
+<p>Do <b>not</b> reach for <code>k8s_job_executor</code> everywhere. For light, frequent pipelines
+(e.g. a 5-minute metrics job), pod-per-step startup latency rivals the run interval and multiplies
+churn — use the in-process executor so each run is a single pod. Reserve
+<code>k8s_job_executor</code> for heavy work like model training, where isolating steps and giving
+each its own resources actually pays off. Executors can differ per job; mix them deliberately.</p>
+
+<div class="callout tip"><span class="t">Node strategy</span>
+Put ephemeral run pods on <b>Karpenter</b>-managed nodes that scale to zero between bursts, and keep
+the always-on webserver and daemon on stable on-demand nodes. Bursty, schedule-driven work is exactly
+what Karpenter is good at.</div>
+</div>
+<div class="section"><h2>6 · Single sign-on with Keycloak</h2>
+<p class="lead">Open-source Dagster has <b>no built-in login</b> — anyone who can reach the URL has full
+access. We fix that by enforcing authentication at the edge, in front of the webserver, using the
+company's existing Keycloak identity provider.</p>
+
+<h3>The pattern: authenticate at the edge</h3>
+<p>Requests enter through an <b>ALB ingress</b> and hit <b>oauth2-proxy</b> before reaching Dagster.
+oauth2-proxy speaks <b>OIDC</b> (OpenID Connect) to <b>Keycloak</b>. If the user has no valid session,
+they are bounced to Keycloak to log in (with whatever the company enforces — MFA, device checks).
+Once authenticated, oauth2-proxy forwards the request to the webserver and adds identity headers
+describing the user. Dagster itself never handles a password.</p>
+<div class="fig">
+<svg viewBox="0 0 760 350" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ss" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<text x="70"  y="24" text-anchor="middle" font-size="9.5" class="t-ttl">User</text>
+<text x="250" y="24" text-anchor="middle" font-size="9.5" class="t-ttl">oauth2-proxy</text>
+<text x="430" y="24" text-anchor="middle" font-size="9.5" class="t-ttl">Keycloak</text>
+<text x="650" y="24" text-anchor="middle" font-size="9.5" class="t-ttl">Webserver</text>
+<line x1="70"  y1="34" x2="70"  y2="324" stroke="#cfcae0" stroke-width="1.4"/>
+<line x1="250" y1="34" x2="250" y2="324" stroke="#cfcae0" stroke-width="1.4"/>
+<line x1="430" y1="34" x2="430" y2="324" stroke="#cfcae0" stroke-width="1.4"/>
+<line x1="650" y1="34" x2="650" y2="324" stroke="#cfcae0" stroke-width="1.4"/>
+
+<path d="M72 56 L248 56" class="edge" marker-end="url(#ss)"/>
+<text x="160" y="50" text-anchor="middle" font-size="8.2" class="elbl">1. open Dagster UI</text>
+<path d="M248 86 L72 86" class="edge" marker-end="url(#ss)"/>
+<text x="160" y="80" text-anchor="middle" font-size="8.2" class="elbl">2. no session → redirect to login</text>
+<path d="M72 116 L428 116" class="edge" marker-end="url(#ss)"/>
+<text x="250" y="110" text-anchor="middle" font-size="8.2" class="elbl">3. follow redirect to Keycloak</text>
+<path d="M428 146 L72 146" class="edge" marker-end="url(#ss)"/>
+<text x="250" y="140" text-anchor="middle" font-size="8.2" class="elbl">4. Samsung login page (MFA, etc.)</text>
+<path d="M72 176 L428 176" class="edge" marker-end="url(#ss)"/>
+<text x="250" y="170" text-anchor="middle" font-size="8.2" class="elbl">5. submit credentials</text>
+<path d="M428 206 L252 206" class="edge" marker-end="url(#ss)"/>
+<text x="340" y="200" text-anchor="middle" font-size="8.2" class="elbl">6. auth code → proxy</text>
+<path d="M252 236 L428 236" class="edge-d" marker-end="url(#ss)"/>
+<text x="340" y="230" text-anchor="middle" font-size="8.2" class="elbl">7. exchange code for ID token</text>
+<path d="M252 266 L648 266" class="edge" marker-end="url(#ss)"/>
+<text x="450" y="260" text-anchor="middle" font-size="8.2" class="elbl">8. forward request + identity headers (X-Auth-Request-User / Groups)</text>
+<path d="M648 296 L72 296" class="edge" marker-end="url(#ss)"/>
+<text x="360" y="290" text-anchor="middle" font-size="8.2" class="elbl">9. Dagster UI loads — user is authenticated</text>
+
+<rect x="120" y="312" width="520" height="22" rx="6" fill="#ecfdf5" stroke="#bfe0c8"/>
+<text x="380" y="327" text-anchor="middle" font-size="8.2" fill="#047857" font-weight="700">Dagster never sees a password — the proxy enforces auth at the edge</text>
+</svg></div><div class="cap">Figure 6 — The OIDC login handshake. Steps 1–9 happen in a fraction of a second after first login.</div>
+
+<h3>Two stages, on purpose</h3>
+<table>
+<tr><th>Stage</th><th>What it gives you</th><th>Limitation</th></tr>
+<tr><td><b>Interim — dagster-authkit</b></td>
+<td>A login page and simple role-based access (admin / editor / launcher / viewer) wrapping the
+webserver. Fast to stand up; good for local and early testing.</td>
+<td>Roles are <b>instance-global</b> — it cannot say "team A may run only the ingestion domain."</td></tr>
+<tr><td><b>Target — Keycloak + oauth2-proxy</b></td>
+<td>Real enterprise SSO through the company identity provider, MFA included, sessions managed
+centrally. The production answer on EKS.</td>
+<td>Requires a Keycloak <b>client registration</b> from the identity team before it can be wired.</td></tr>
+</table>
+
+<div class="callout"><span class="t">Why edge auth beats in-app auth here</span>
+Dagster's UI talks to a single GraphQL endpoint, so per-action rules are awkward to enforce inside the
+app. Terminating auth at the ingress keeps Dagster simple and puts identity in one audited place,
+reusing infrastructure the company already runs.</div>
+
+<div class="callout tip"><span class="t">Per-domain access</span>
+Real per-domain isolation (team A → ingestion only) comes from group claims in the Keycloak token,
+evaluated at the proxy — not from authkit. Plan for it in the OIDC stage.</div>
+</div>
+<div class="section"><h2>7 · Version discipline</h2>
+<p class="lead">One rule prevents a whole category of confusing failures: keep every Dagster version in
+lockstep.</p>
+<p>The Helm chart is versioned with the same numbers as the Dagster Python library. So the chart
+version, the system images (webserver, daemon), and <b>every code-location image</b> must all be the
+<i>same</i> Dagster version. A mismatch shows up as a gRPC handshake failure when the webserver tries
+to load a code location — a baffling error if you don't know the cause.</p>
+
+<h3>The two version numbers</h3>
+<p>Dagster uses two version tracks that move together and must <b>both</b> be pinned:</p>
+<table>
+<tr><th>Track</th><th>Packages</th><th>Example</th></tr>
+<tr><td>Core</td><td><code>dagster</code>, <code>dagster-webserver</code>, <code>dagster-graphql</code></td><td><code>1.13.x</code></td></tr>
+<tr><td>Integration libraries</td><td><code>dagster-postgres</code>, <code>dagster-aws</code>, <code>dagster-k8s</code> …</td><td><code>0.29.x</code></td></tr>
+</table>
+<p>They map one-to-one: core <code>1.13.10</code> goes with libraries <code>0.29.10</code>. There is
+<b>no</b> <code>dagster-postgres==1.13.10</code> — installing a library with the core version string
+simply fails. Keep both numbers in one source of truth (a <code>versions.toml</code>) and feed them
+into every image build, so they can never drift apart.</p>
+<div class="callout warn"><span class="t">Common mistake</span>
+Bumping the chart (<code>helm upgrade --version 1.13.11</code>) but leaving code-location images on an
+older version. Always move the chart and all images together, and re-run your tests after a bump.</div>
+</div>
+<div class="section"><h2>8 · Step-by-step deployment</h2>
+<p class="lead">The order matters. Each step assumes the previous one succeeded. Adapt names and ARNs
+to your environment.</p>
+<div class="fig">
+<svg viewBox="0 0 760 150" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="or" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L8,3.2 L0,6.4 Z" fill="#6b6786"/></marker></defs>
+<rect x="12" y="46" width="118" height="58" rx="9" class="s-grp"/><text x="71" y="68" text-anchor="middle" font-size="13" class="t-ttl">1</text><text x="71" y="86" text-anchor="middle" font-size="8.2" class="t-sub">VPC, EKS, Karpenter</text><rect x="138" y="46" width="118" height="58" rx="9" class="s-aws"/><text x="197" y="68" text-anchor="middle" font-size="13" class="t-ttl">2</text><text x="197" y="86" text-anchor="middle" font-size="8.2" class="t-sub">RDS · S3 · ECR · roles</text><rect x="264" y="46" width="118" height="58" rx="9" class="s-sys"/><text x="323" y="68" text-anchor="middle" font-size="13" class="t-ttl">3</text><text x="323" y="86" text-anchor="middle" font-size="8.2" class="t-sub">system release</text><rect x="390" y="46" width="118" height="58" rx="9" class="s-code"/><text x="449" y="68" text-anchor="middle" font-size="13" class="t-ttl">4</text><text x="449" y="86" text-anchor="middle" font-size="8.2" class="t-sub">code locations</text><rect x="516" y="46" width="118" height="58" rx="9" class="s-sso"/><text x="575" y="68" text-anchor="middle" font-size="13" class="t-ttl">5</text><text x="575" y="86" text-anchor="middle" font-size="8.2" class="t-sub">ingress + Keycloak</text><rect x="642" y="46" width="118" height="58" rx="9" class="s-run"/><text x="701" y="68" text-anchor="middle" font-size="13" class="t-ttl">6</text><text x="701" y="86" text-anchor="middle" font-size="8.2" class="t-sub">TTL + pruning</text><path d="M130 75 L138 75" class="edge" marker-end="url(#or)"/><path d="M256 75 L264 75" class="edge" marker-end="url(#or)"/><path d="M382 75 L390 75" class="edge" marker-end="url(#or)"/><path d="M508 75 L516 75" class="edge" marker-end="url(#or)"/><path d="M634 75 L642 75" class="edge" marker-end="url(#or)"/>
+<text x="380" y="128" text-anchor="middle" font-size="8.6" class="elbl">then: load-test at real cadence and watch RDS rows + cluster object counts</text>
+</svg></div><div class="cap">Figure 7 — Deploy in this order. Never wire auth or run a load test before the core loop is green.</div>
+
+<h4>Step 1 — Cluster foundation</h4>
+<p>Stand up the VPC and EKS cluster, install Karpenter, and create the namespaces. Confirm
+<code>kubectl get nodes</code> shows healthy nodes before continuing.</p>
+
+<h4>Step 2 — AWS resources and identity</h4>
+<p>Create the RDS instance, the S3 bucket(s), and the ECR repositories. Create the IAM roles and bind
+them to the service accounts (IRSA / Pod Identity) — including the role used by run pods. Install the
+External Secrets Operator and point it at Secrets Manager.</p>
+
+<h4>Step 3 — Add the chart repo and install the system release</h4>
+<pre><span class="c"># register Dagster's Helm chart repository</span>
+helm repo add dagster https://dagster-io.github.io/helm
+helm repo update
+
+<span class="c"># install the system release, pinned, Postgres disabled, pointed at RDS</span>
+helm upgrade --install dagster-system dagster/dagster \
+  --namespace dagster --create-namespace \
+  --version 1.13.x \
+  -f values-system.yaml</pre>
+<p>In <code>values-system.yaml</code> you set <code>postgresql.enabled=false</code>, the RDS
+connection (from a synced secret), the run launcher and retention settings, and the
+<code>workspace</code> list pointing at the code-location services from Step 4.</p>
+
+<h4>Step 4 — Install the code-location release</h4>
+<pre><span class="c"># a separate release so domains deploy independently of the system</span>
+helm upgrade --install dagster-code dagster/dagster-user-deployments \
+  --namespace dagster \
+  --version 1.13.x \
+  -f values-code.yaml</pre>
+<p><code>values-code.yaml</code> lists one deployment per domain — image (from ECR), the
+<code>dagsterApiGrpcArgs</code> pointing at its module, the service account with S3 access, and env
+from synced secrets. Open the UI (via port-forward for now) and confirm every code location loads
+<b>green</b> and a test asset materializes.</p>
+
+<h4>Step 5 — Ingress and SSO</h4>
+<p>Deploy the ALB ingress and oauth2-proxy, configured against the Keycloak client your identity team
+registered. Verify that hitting the URL now redirects to Keycloak and, after login, returns you to a
+working UI.</p>
+
+<h4>Step 6 — Cleanup and validation</h4>
+<p>Enable <code>ttlSecondsAfterFinished</code> on launched jobs and schedule the Postgres pruning
+job. Then load-test at the real schedule cadence and watch two numbers: RDS row growth and Kubernetes
+finished-object counts. If both stay flat over a few hours, the deployment is healthy.</p>
+</div>
+<div class="section" style="page-break-before:auto;"><h2>9 · Gotchas &amp; pre-flight checklist</h2>
+<p class="lead">The failures juniors hit first, and a checklist to catch them before they happen.</p>
+
+<h3>Top gotchas</h3>
+<table>
+<tr><th>Symptom</th><th>Likely cause</th></tr>
+<tr><td>Assets work locally, <code>AccessDenied</code> in cluster</td>
+<td>S3 IAM role not bound to the <b>run pods</b> (only to the code location). See Section 4.</td></tr>
+<tr><td>Code location won't load; gRPC handshake error</td>
+<td>Version mismatch between chart / system image / code image. See Section 7.</td></tr>
+<tr><td>Cluster slows down, <code>kubectl</code> lags after days</td>
+<td>Finished Jobs never cleaned up — missing TTL. See Section 5.</td></tr>
+<tr><td>RDS storage climbs steadily, UI gets slow</td>
+<td>No DB pruning — <code>runs</code>/<code>event_logs</code> growing unbounded. See Section 5.</td></tr>
+<tr><td>Pipelines lag behind a 5-minute schedule</td>
+<td>Using <code>k8s_job_executor</code> for light work — pod startup overhead. See Section 5.</td></tr>
+<tr><td>Anyone with the link sees everything</td>
+<td>No edge auth wired yet — oauth2-proxy/Keycloak not in front. See Section 6.</td></tr>
+</table>
+
+<h3>Pre-flight checklist</h3>
+<table>
+<tr><th>#</th><th>Check</th></tr>
+<tr><td>1</td><td>RDS reachable; <code>postgresql.enabled=false</code> in the system values.</td></tr>
+<tr><td>2</td><td>S3 bucket exists; IAM role bound to code locations <b>and</b> run pods.</td></tr>
+<tr><td>3</td><td>ECR images pushed; pull access reaches run pods.</td></tr>
+<tr><td>4</td><td>Secrets synced from Secrets Manager via External Secrets Operator.</td></tr>
+<tr><td>5</td><td>Chart version == system image version == every code image version (core + lib).</td></tr>
+<tr><td>6</td><td>Every code location loads green; a test asset materializes end-to-end.</td></tr>
+<tr><td>7</td><td>Schedules tick on the daemon at the agreed cadence.</td></tr>
+<tr><td>8</td><td>Executor chosen per job (in-process for light, k8s_job for heavy).</td></tr>
+<tr><td>9</td><td>TTL set on launched jobs; Postgres pruning job scheduled.</td></tr>
+<tr><td>10</td><td>Ingress redirects to Keycloak; login returns to a working UI.</td></tr>
+<tr><td>11</td><td>Karpenter scales run nodes up under load and back to zero after.</td></tr>
+<tr><td>12</td><td>Load test at real cadence: RDS rows and cluster objects stay flat.</td></tr>
+</table>
+
+<div class="callout tip" style="margin-top:6px;"><span class="t">If you remember only three things</span>
+(1) The cluster is disposable — durable state is in RDS and S3.
+(2) Grant S3 to the run pods, not just the code locations.
+(3) Pin one Dagster version everywhere, and clean up finished jobs and old DB rows from day one.</div>
+</div></body></html>
