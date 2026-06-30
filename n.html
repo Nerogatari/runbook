@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Runbook — Autoscaling for 60-second Dagster jobs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;450;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#ECEEF2;
+    --surface:#FFFFFF;
+    --surface-2:#F5F7F9;
+    --ink:#14161B;
+    --ink-soft:#474D57;
+    --muted:#878D98;
+    --line:#D7DBE1;
+    --line-soft:#E6E9ED;
+    --warm:#CF6E22;          /* warm capacity / recommended */
+    --warm-deep:#A8530F;
+    --warm-tint:#FAEEE2;
+    --cold:#2A7691;          /* cold start / provisioning */
+    --cold-tint:#E1EEF2;
+    --slate:#3B4250;         /* execution / neutral */
+    --stop:#A93726;          /* avoid verdict only */
+    --good:#2F7D55;
+    --radius:4px;
+    --maxw:1080px;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Inter",system-ui,sans-serif;
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px;}
+  h1,h2,h3{font-family:"Space Grotesk",sans-serif;font-weight:600;line-height:1.15;letter-spacing:-0.01em;margin:0;}
+  .mono{font-family:"JetBrains Mono",monospace;}
+  a{color:var(--cold);}
+
+  /* ---------- Header ---------- */
+  header.doc{
+    background:var(--ink);
+    color:#EDEFF2;
+    border-bottom:3px solid var(--warm);
+  }
+  .doc-inner{padding:34px 0 30px;}
+  .eyebrow{
+    font-family:"JetBrains Mono",monospace;
+    font-size:11.5px;letter-spacing:0.18em;text-transform:uppercase;
+    color:var(--warm);margin-bottom:14px;
+  }
+  header.doc h1{font-size:clamp(27px,4.6vw,44px);color:#fff;max-width:18ch;}
+  header.doc h1 em{font-style:normal;color:var(--warm);}
+  .meta-strip{
+    display:flex;flex-wrap:wrap;gap:0;margin-top:26px;
+    border:1px solid #2A2E36;border-radius:var(--radius);overflow:hidden;
+    font-family:"JetBrains Mono",monospace;
+  }
+  .meta-cell{
+    flex:1 1 150px;padding:11px 16px;border-right:1px solid #2A2E36;background:#1A1D23;
+  }
+  .meta-cell:last-child{border-right:none;}
+  .meta-cell .k{font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);}
+  .meta-cell .v{font-size:13.5px;color:#E7E9EC;margin-top:3px;font-weight:500;}
+  .meta-cell .v.warn{color:var(--warm);}
+
+  /* ---------- Sections ---------- */
+  section{padding:54px 0;border-bottom:1px solid var(--line);}
+  section:last-of-type{border-bottom:none;}
+  .sec-label{
+    font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:0.16em;
+    text-transform:uppercase;color:var(--warm-deep);margin-bottom:12px;display:flex;align-items:center;gap:10px;
+  }
+  .sec-label::before{content:"";width:26px;height:2px;background:var(--warm);display:inline-block;}
+  h2.sec-title{font-size:clamp(22px,3vw,30px);margin-bottom:8px;}
+  .sec-intro{color:var(--ink-soft);max-width:68ch;margin-top:12px;}
+
+  /* ---------- Thesis / hero diagram ---------- */
+  .thesis{background:var(--surface);}
+  .thesis-grid{display:grid;grid-template-columns:1fr;gap:30px;margin-top:30px;}
+  .pull{
+    font-family:"Space Grotesk",sans-serif;font-weight:500;font-size:clamp(19px,2.6vw,26px);
+    line-height:1.35;letter-spacing:-0.01em;max-width:24ch;
+  }
+  .pull b{color:var(--warm-deep);font-weight:700;}
+
+  .cycle{
+    background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:24px 22px 18px;
+  }
+  .cycle-cap{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);margin-bottom:20px;}
+  .track{position:relative;height:38px;margin:0 0 8px;}
+  .track-row{position:relative;height:38px;margin-bottom:14px;}
+  .seg{position:absolute;top:0;height:38px;border-radius:3px;display:flex;align-items:center;padding-left:10px;
+       font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:500;color:#fff;overflow:hidden;white-space:nowrap;}
+  .seg.exec{background:var(--slate);}
+  .seg.idle{background:repeating-linear-gradient(45deg,#E3E6EA,#E3E6EA 6px,#DADEE3 6px,#DADEE3 12px);color:var(--ink-soft);border:1px dashed #C3C8CF;}
+  .seg.cold{background:var(--cold);}
+  .seg.warm{background:var(--warm);}
+  .row-label{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--ink-soft);margin-bottom:6px;letter-spacing:0.04em;}
+  .boundary{position:absolute;top:-6px;bottom:-6px;width:2px;background:var(--stop);z-index:5;}
+  .boundary span{position:absolute;top:-18px;left:50%;transform:translateX(-50%);font-family:"JetBrains Mono",monospace;
+       font-size:10px;color:var(--stop);white-space:nowrap;font-weight:600;}
+  .axis{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--muted);margin-top:14px;border-top:1px solid var(--line);padding-top:6px;}
+  .overflow-note{margin-top:14px;font-size:13px;color:var(--stop);font-family:"JetBrains Mono",monospace;}
+
+  /* ---------- TL;DR ---------- */
+  .tldr{
+    background:var(--warm-tint);border:1px solid #EAC9A6;border-left:4px solid var(--warm);
+    border-radius:6px;padding:26px 28px;margin-top:10px;
+  }
+  .tldr h3{font-size:18px;margin-bottom:14px;color:var(--warm-deep);}
+  .tldr p{margin:0 0 12px;color:#5A4326;}
+  .tldr p:last-child{margin-bottom:0;}
+  .tldr strong{color:var(--ink);}
+
+  /* ---------- Tables ---------- */
+  .table-scroll{overflow-x:auto;margin-top:26px;border:1px solid var(--line);border-radius:6px;background:var(--surface);}
+  table{width:100%;border-collapse:collapse;font-size:14px;min-width:680px;}
+  thead th{
+    background:var(--ink);color:#E7E9EC;text-align:left;padding:13px 16px;font-family:"JetBrains Mono",monospace;
+    font-size:11px;letter-spacing:0.08em;text-transform:uppercase;font-weight:500;position:sticky;top:0;
+  }
+  tbody td{padding:13px 16px;border-top:1px solid var(--line-soft);vertical-align:top;color:var(--ink-soft);}
+  tbody tr:nth-child(even){background:var(--surface-2);}
+  td .opt{font-weight:600;color:var(--ink);font-family:"Space Grotesk",sans-serif;}
+  td.num{font-family:"JetBrains Mono",monospace;color:var(--ink);white-space:nowrap;}
+  .rec-row{background:var(--warm-tint)!important;}
+  .rec-row td{border-top:1px solid #EAC9A6;}
+
+  .chip{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;
+        letter-spacing:0.04em;text-transform:uppercase;padding:3px 8px;border-radius:3px;white-space:nowrap;}
+  .chip.pick{background:var(--warm);color:#fff;}
+  .chip.viable{background:transparent;color:var(--warm-deep);border:1px solid var(--warm);}
+  .chip.avoid{background:transparent;color:var(--stop);border:1px solid var(--stop);}
+  .chip.lat-lo{background:var(--good);color:#fff;}
+  .chip.lat-mid{background:#C98A2E;color:#fff;}
+  .chip.lat-hi{background:var(--cold);color:#fff;}
+
+  /* ---------- Option cards ---------- */
+  .cards{display:grid;grid-template-columns:1fr;gap:18px;margin-top:28px;}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:0;overflow:hidden;}
+  .card.is-rec{border:1px solid var(--warm);box-shadow:0 0 0 3px var(--warm-tint);}
+  .card-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:18px 22px;border-bottom:1px solid var(--line-soft);}
+  .card-head .nm{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}
+  .card-head h3{font-size:18px;}
+  .card-idx{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--muted);}
+  .card-body{padding:18px 22px 22px;}
+  .card-body .how{color:var(--ink-soft);font-size:14px;margin:0 0 18px;padding-bottom:16px;border-bottom:1px dashed var(--line);}
+  .pc{display:grid;grid-template-columns:1fr 1fr;gap:22px;}
+  .pc h4{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 10px;}
+  .pc .pros h4{color:var(--good);}
+  .pc .cons h4{color:var(--stop);}
+  .pc ul{margin:0;padding:0;list-style:none;}
+  .pc li{position:relative;padding-left:18px;margin-bottom:9px;font-size:13.5px;color:var(--ink-soft);line-height:1.5;}
+  .pc li::before{position:absolute;left:0;top:0;font-family:"JetBrains Mono",monospace;font-weight:600;}
+  .pc .pros li::before{content:"+";color:var(--good);}
+  .pc .cons li::before{content:"−";color:var(--stop);}
+  .cost-line{margin-top:18px;padding-top:14px;border-top:1px dashed var(--line);font-size:13px;color:var(--ink-soft);}
+  .cost-line b{color:var(--ink);font-family:"JetBrains Mono",monospace;}
+
+  /* ---------- Scenarios ---------- */
+  .scenarios{display:grid;grid-template-columns:1fr;gap:14px;margin-top:28px;}
+  .scn{display:grid;grid-template-columns:48px 1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--surface);}
+  .scn-tag{display:flex;align-items:center;justify-content:center;font-family:"JetBrains Mono",monospace;font-weight:600;font-size:15px;color:#fff;}
+  .scn-tag.warm{background:var(--warm);}
+  .scn-tag.cold{background:var(--cold);}
+  .scn-tag.stop{background:var(--stop);}
+  .scn-body{padding:15px 18px;}
+  .scn-body .if{font-weight:600;color:var(--ink);font-size:14.5px;margin-bottom:5px;}
+  .scn-body .then{font-size:13.5px;color:var(--ink-soft);}
+  .scn-body .then b{color:var(--warm-deep);font-family:"Space Grotesk",sans-serif;}
+
+  /* ---------- Decision flow ---------- */
+  .flow{margin-top:26px;border:1px solid var(--line);border-radius:6px;background:var(--surface);padding:8px 0;}
+  .q{padding:16px 22px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:30px 1fr;gap:14px;align-items:start;}
+  .q:last-child{border-bottom:none;}
+  .q .qn{font-family:"JetBrains Mono",monospace;font-weight:600;color:var(--warm-deep);font-size:13px;padding-top:1px;}
+  .q .qt{font-size:14.5px;}
+  .q .qt .lead{font-weight:600;color:var(--ink);display:block;margin-bottom:4px;}
+  .q .qt .ans{color:var(--ink-soft);font-size:13.5px;}
+  .q .qt .ans .y{color:var(--good);font-weight:600;font-family:"JetBrains Mono",monospace;font-size:12px;}
+  .q .qt .ans .n{color:var(--stop);font-weight:600;font-family:"JetBrains Mono",monospace;font-size:12px;}
+
+  /* ---------- Glossary ---------- */
+  .gloss{background:var(--surface);}
+  .gloss-grid{display:grid;grid-template-columns:1fr;gap:0;margin-top:24px;border:1px solid var(--line);border-radius:6px;overflow:hidden;}
+  .term{display:grid;grid-template-columns:200px 1fr;gap:0;border-top:1px solid var(--line-soft);}
+  .term:first-child{border-top:none;}
+  .term dt{font-family:"JetBrains Mono",monospace;font-weight:600;font-size:13px;color:var(--ink);padding:14px 18px;background:var(--surface-2);border-right:1px solid var(--line-soft);}
+  .term dd{margin:0;padding:14px 18px;font-size:13.5px;color:var(--ink-soft);}
+
+  .note{margin-top:22px;font-size:12.5px;color:var(--muted);font-family:"JetBrains Mono",monospace;line-height:1.6;border-left:2px solid var(--line);padding-left:14px;}
+
+  footer{background:var(--ink);color:var(--muted);padding:26px 0;font-family:"JetBrains Mono",monospace;font-size:12px;}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+
+  /* ---------- Responsive ---------- */
+  @media(min-width:760px){
+    .thesis-grid{grid-template-columns:0.85fr 1.15fr;align-items:center;}
+    .cards{gap:20px;}
+    .scenarios{grid-template-columns:1fr 1fr;}
+    .gloss-grid{grid-template-columns:1fr 1fr;}
+    .gloss-grid .term:nth-child(2){border-top:none;}
+  }
+  @media(max-width:520px){
+    .pc{grid-template-columns:1fr;gap:18px;}
+    .term{grid-template-columns:1fr;}
+    .term dt{border-right:none;border-bottom:1px solid var(--line-soft);}
+  }
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto;}}
+  @media print{
+    body{background:#fff;}
+    header.doc,footer{background:#fff;color:#000;border-color:#000;}
+    header.doc h1,.meta-cell .v{color:#000;}
+    section{break-inside:avoid;}
+  }
+  a:focus-visible,.q:focus-visible{outline:2px solid var(--cold);outline-offset:2px;}
+</style>
+</head>
+<body>
+
+<header class="doc">
+  <div class="wrap doc-inner">
+    <div class="eyebrow">Runbook · Platform / AIOPS · Capacity</div>
+    <h1>Autoscaling for jobs that run <em>every 60 seconds</em></h1>
+    <div class="meta-strip">
+      <div class="meta-cell"><div class="k">System</div><div class="v">Dagster (OSS) on K8s</div></div>
+      <div class="meta-cell"><div class="k">Cadence</div><div class="v">60s · short jobs</div></div>
+      <div class="meta-cell"><div class="k">Decision</div><div class="v warn">Where to hold warm capacity</div></div>
+      <div class="meta-cell"><div class="k">Status</div><div class="v">Draft · Rev A</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- THESIS -->
+<section class="thesis">
+  <div class="wrap">
+    <div class="sec-label">The one thing to understand first</div>
+    <h2 class="sec-title">At a 60-second cadence, scale-to-zero saves nothing</h2>
+    <div class="thesis-grid">
+      <p class="pull">The idle gap between runs is <b>seconds, not minutes</b>. Anything that tears a node down and rebuilds it per run pays a cold-start tax on <b>almost every run</b>.</p>
+      <div class="cycle">
+        <div class="cycle-cap">One 60-second cycle — to scale (seconds)</div>
+
+        <div class="track-row">
+          <div class="row-label">Run on warm capacity</div>
+          <div class="seg exec" style="left:0;width:30%;">execute job ~18s</div>
+          <div class="seg idle" style="left:30%;width:70%;">idle gap ~42s</div>
+        </div>
+
+        <div class="track-row">
+          <div class="row-label">Dispatch latency · warm pool</div>
+          <div class="seg warm" style="left:0;width:3%;"></div>
+          <div class="seg" style="left:4%;width:60%;background:none;color:var(--warm-deep);padding-left:0;">&lt;1s — capacity already up</div>
+        </div>
+
+        <div class="track-row" style="margin-bottom:20px;">
+          <div class="row-label">Cold start · provision a node</div>
+          <div class="seg cold" style="left:0;width:77%;">node provision + image pull + code-server connect: 40s–120s</div>
+          <div class="boundary" style="left:46.15%;"><span>60s — next run is due</span></div>
+        </div>
+
+        <div class="axis"><span>0s</span><span>30s</span><span>60s</span><span>90s</span><span>130s</span></div>
+        <div class="overflow-note">▲ The cold-start bar overruns the 60s boundary — the next run is queued before the last one is ready.</div>
+      </div>
+    </div>
+    <p class="sec-intro">So the real question is <strong>not</strong> "should we autoscale?" — it's <strong>how much warm capacity to hold, and where</strong>. Autoscaling only pays off if this job shares a cluster with bursty or larger periodic workloads that actually go quiet.</p>
+  </div>
+</section>
+
+<!-- TL;DR -->
+<section>
+  <div class="wrap">
+    <div class="sec-label">For managers — read this box</div>
+    <h2 class="sec-title">Recommendation in three lines</h2>
+    <div class="tldr">
+      <h3>Hold warm capacity. Do not deprovision between runs.</h3>
+      <p><strong>Default pick:</strong> Prewarmed Karpenter (warm headroom held by low-priority "pause" pods) running the Dagster Kubernetes executor, with a persistent code server and pre-pulled images. Stays on Dagster's recommended path, no message broker to operate, and node provisioning is off the critical path.</p>
+      <p><strong>Alternative:</strong> Celery + KEDA if — and only if — you have very high fan-out of many tiny steps, where packing them onto a few always-warm processes beats one pod per step. The cost is owning a broker.</p>
+      <p><strong>Avoid:</strong> Vanilla Karpenter that scales to zero. At this cadence it looks cheap on paper but pays a cold-start tax on nearly every run, for little real saving.</p>
+    </div>
+    <p class="note">Bottom line for budget: at 60s cadence all three options cost about the same per month (see cost model). The deciding factors are latency and operational burden, not autoscaling savings.</p>
+  </div>
+</section>
+
+<!-- COMPARISON TABLE -->
+<section>
+  <div class="wrap">
+    <div class="sec-label">Side by side</div>
+    <h2 class="sec-title">The three architectures at a glance</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Architecture</th>
+            <th>How it scales</th>
+            <th>Dispatch latency</th>
+            <th>Broker?</th>
+            <th>Ops burden</th>
+            <th>Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="rec-row">
+            <td><span class="opt">Prewarmed Karpenter</span></td>
+            <td>Pause pods reserve a node of headroom; a real run preempts one and schedules instantly, a replacement provisions in the background.</td>
+            <td><span class="chip lat-lo">Low</span></td>
+            <td><span class="num">No</span></td>
+            <td>Medium</td>
+            <td><span class="chip pick">Pick</span></td>
+          </tr>
+          <tr>
+            <td><span class="opt">Celery + KEDA</span></td>
+            <td>Long-lived workers pull from a queue; KEDA scales the worker count on queue depth (min replicas held warm).</td>
+            <td><span class="chip lat-lo">Low</span></td>
+            <td><span class="num">Yes</span></td>
+            <td>High</td>
+            <td><span class="chip viable">Conditional</span></td>
+          </tr>
+          <tr>
+            <td><span class="opt">Vanilla Karpenter</span></td>
+            <td>One pod per run; Karpenter provisions a node whenever a pod goes Pending, consolidates away when idle.</td>
+            <td><span class="chip lat-hi">High</span></td>
+            <td><span class="num">No</span></td>
+            <td>Low</td>
+            <td><span class="chip avoid">Avoid</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">"Dispatch latency" = time from a run being requested to its first line of work executing. At 60s cadence this is the metric that matters most.</p>
+  </div>
+</section>
+
+<!-- COST MODEL -->
+<section>
+  <div class="wrap">
+    <div class="sec-label">Cost model — illustrative</div>
+    <h2 class="sec-title">What each option costs per month</h2>
+    <p class="sec-intro">Worked example so the shape of the numbers is clear. Swap in your real inputs to get exact figures (see assumptions below).</p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Architecture</th>
+            <th>Warm capacity</th>
+            <th>Broker</th>
+            <th>Job compute</th>
+            <th>Est. total / mo</th>
+            <th>p95 dispatch</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="rec-row">
+            <td><span class="opt">Prewarmed Karpenter</span></td>
+            <td class="num">~1 node held<br>≈ $70</td>
+            <td class="num">$0</td>
+            <td class="num">spillover<br>≈ $10–20</td>
+            <td class="num">≈ $80–90</td>
+            <td><span class="chip lat-lo">~1–3s</span></td>
+          </tr>
+          <tr>
+            <td><span class="opt">Celery + KEDA</span></td>
+            <td class="num">2 workers / 1 node<br>≈ $70</td>
+            <td class="num">Redis<br>≈ $25</td>
+            <td class="num">included</td>
+            <td class="num">≈ $95</td>
+            <td><span class="chip lat-lo">&lt;1s</span></td>
+          </tr>
+          <tr>
+            <td><span class="opt">Vanilla Karpenter</span></td>
+            <td class="num">$0 nominal</td>
+            <td class="num">$0</td>
+            <td class="num">~1 node-equiv<br>anyway ≈ $70</td>
+            <td class="num">≈ $70 + churn</td>
+            <td><span class="chip lat-hi">40s–120s</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Assumptions: AWS on-demand, m6i.large ≈ $0.096/hr (~$70/mo run 24×7); job ≈ 18s, 3 concurrent runs, every 60s; Redis = cache.t4g.small. Key insight: at this cadence the "scale-to-zero" column still adds up to ~1 node running continuously, so vanilla Karpenter's apparent saving is mostly illusory — and it buys you the worst latency. Numbers move materially with: spot vs on-demand, region, instance family, real concurrency, and whether the cluster carries other workloads.</p>
+  </div>
+</section>
+
+<!-- OPTION CARDS -->
+<section>
+  <div class="wrap">
+    <div class="sec-label">The detail</div>
+    <h2 class="sec-title">Each option, pros and cons</h2>
+    <div class="cards">
+
+      <!-- Card 1 -->
+      <div class="card is-rec">
+        <div class="card-head">
+          <div class="nm"><span class="card-idx">01</span><h3>Prewarmed Karpenter</h3></div>
+          <span class="chip pick">Recommended</span>
+        </div>
+        <div class="card-body">
+          <p class="how">Karpenter has no native warm-pool setting. You create headroom with low-<span class="mono">PriorityClass</span> pause ("balloon") pods that hold a node's worth of capacity. A real run pod preempts a pause pod and schedules onto the already-Ready node immediately; Karpenter then provisions a replacement in the background. Run pods stay thin by talking to a persistent gRPC code server, and images are pre-pulled by a DaemonSet.</p>
+          <div class="pc">
+            <div class="pros">
+              <h4>Pros</h4>
+              <ul>
+                <li>Node provisioning is off the critical path — runs start in seconds.</li>
+                <li>No broker to run; aligns with Dagster's recommended Kubernetes launcher + executor.</li>
+                <li>Precise bin-packing; warm headroom is just one extra node.</li>
+              </ul>
+            </div>
+            <div class="cons">
+              <h4>Cons</h4>
+              <ul>
+                <li>More Karpenter + PriorityClass configuration to get right.</li>
+                <li>Pause pods reserve roughly a whole node that sits idle.</li>
+                <li>Still need pre-pull + persistent code server, or per-pod init creeps back in.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="cost-line">Cost shape: <b>warm headroom + actual job compute</b>. Slightly more than a tightly-sized Celery pool because the reservation is coarser-grained.</p>
+        </div>
+      </div>
+
+      <!-- Card 2 -->
+      <div class="card">
+        <div class="card-head">
+          <div class="nm"><span class="card-idx">02</span><h3>Celery + KEDA</h3></div>
+          <span class="chip viable">Conditional</span>
+        </div>
+        <div class="card-body">
+          <p class="how">Long-lived worker pods pull runs and steps off a broker (Redis list or RabbitMQ queue). KEDA scales the worker Deployment on queue depth, with a <span class="mono">minReplicaCount</span> held permanently warm. Because workers are already running with the code location loaded, dispatch is effectively instant.</p>
+          <div class="pc">
+            <div class="pros">
+              <h4>Pros</h4>
+              <ul>
+                <li>Workers stay warm — no pod scheduling, no image pull, code already loaded. Sub-second dispatch.</li>
+                <li>Multiplexes many tiny steps onto a few processes — compute-efficient for high fan-out.</li>
+                <li>Smallest, most predictable footprint for steady load.</li>
+              </ul>
+            </div>
+            <div class="cons">
+              <h4>Cons</h4>
+              <ul>
+                <li>You own a broker + result backend: stateful, visibility-timeout tuning, lost-task semantics.</li>
+                <li>KEDA's ~30s default poll makes scale reactions laggy (mostly hidden if you hold min replicas).</li>
+                <li>Maintained but no longer Dagster's recommended K8s default — you swim against the current direction.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="cost-line">Cost shape: <b>small fixed warm pool + broker footprint</b>. Cheapest for steady, high-fan-out load — if you accept the broker ops.</p>
+        </div>
+      </div>
+
+      <!-- Card 3 -->
+      <div class="card">
+        <div class="card-head">
+          <div class="nm"><span class="card-idx">03</span><h3>Vanilla Karpenter (scale-to-zero)</h3></div>
+          <span class="chip avoid">Avoid here</span>
+        </div>
+        <div class="card-body">
+          <p class="how">Each run is a Kubernetes Job/pod. Karpenter provisions a node whenever a pod goes Pending and consolidates nodes away when the cluster goes idle. K8s-native and broker-free — and the worst fit for a 60-second cadence.</p>
+          <div class="pc">
+            <div class="pros">
+              <h4>Pros</h4>
+              <ul>
+                <li>Simplest moving parts — no broker, no warm-pool config.</li>
+                <li>K8s-native and aligned with Dagster's recommended launcher.</li>
+                <li>Precise bin-packing when load is genuinely spiky.</li>
+              </ul>
+            </div>
+            <div class="cons">
+              <h4>Cons</h4>
+              <ul>
+                <li>Node-Ready latency of 40s–2min lands on the critical path of nearly every run.</li>
+                <li>Even on a warm node you still pay per-pod image pull + code-server connect.</li>
+                <li>Aggressive consolidation thrashes nodes at this frequency.</li>
+                <li>"Pay only during execution" saving evaporates — utilization is near-constant anyway.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="cost-line">Cost shape: <b>looks cheapest, isn't</b>. Churn overhead and near-100% utilization erase the saving, and you pay it back in latency.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- SCENARIOS -->
+<section>
+  <div class="wrap">
+    <div class="sec-label">Choose by situation</div>
+    <h2 class="sec-title">Scenarios — pick the one that matches you</h2>
+    <div class="scenarios">
+      <div class="scn">
+        <div class="scn-tag warm">A</div>
+        <div class="scn-body">
+          <div class="if">Steady every-60s job, modest fan-out, you want to stay on Dagster's path</div>
+          <div class="then">→ <b>Prewarmed Karpenter</b> + k8s executor, persistent code server, pre-pulled images.</div>
+        </div>
+      </div>
+      <div class="scn">
+        <div class="scn-tag cold">B</div>
+        <div class="scn-body">
+          <div class="if">Each run fans out into hundreds of tiny steps</div>
+          <div class="then">→ <b>Celery + KEDA</b>. Multiplexing tiny steps onto warm processes beats pod-per-step. Accept the broker.</div>
+        </div>
+      </div>
+      <div class="scn">
+        <div class="scn-tag warm">C</div>
+        <div class="scn-body">
+          <div class="if">This job shares a cluster with big, genuinely bursty workloads</div>
+          <div class="then">→ Autoscaling earns its keep. Keep a <b>small warm floor</b> for the 60s job, let Karpenter flex the rest.</div>
+        </div>
+      </div>
+      <div class="scn">
+        <div class="scn-tag stop">D</div>
+        <div class="scn-body">
+          <div class="if">You're tempted by "scale to zero to save money"</div>
+          <div class="then">→ Don't, at this cadence. Re-check the <b>cost model</b> — the saving is mostly illusory and latency suffers.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- DECISION FLOW -->
+<section>
+  <div class="wrap">
+    <div class="sec-label">Quick decision guide</div>
+    <h2 class="sec-title">Answer these in order</h2>
+    <div class="flow">
+      <div class="q" tabindex="0">
+        <div class="qn">Q1</div>
+        <div class="qt"><span class="lead">Does each run fan out into very many tiny steps?</span>
+          <span class="ans"><span class="y">YES →</span> Celery + KEDA is worth the broker. &nbsp;·&nbsp; <span class="n">NO →</span> continue.</span></div>
+      </div>
+      <div class="q" tabindex="0">
+        <div class="qn">Q2</div>
+        <div class="qt"><span class="lead">Is a message broker (Redis/RabbitMQ) something you want to run and own?</span>
+          <span class="ans"><span class="n">NO →</span> rule out Celery; use Karpenter family. &nbsp;·&nbsp; <span class="y">YES →</span> Celery stays on the table.</span></div>
+      </div>
+      <div class="q" tabindex="0">
+        <div class="qn">Q3</div>
+        <div class="qt"><span class="lead">Can a run tolerate 40s–2min of startup delay?</span>
+          <span class="ans"><span class="n">NO (typical) →</span> you must hold warm capacity → Prewarmed Karpenter. &nbsp;·&nbsp; <span class="y">YES →</span> vanilla Karpenter is acceptable.</span></div>
+      </div>
+      <div class="q" tabindex="0">
+        <div class="qn">Q4</div>
+        <div class="qt"><span class="lead">Did you add a persistent code server + image pre-pull?</span>
+          <span class="ans"><span class="n">NO →</span> do this first — it kills cold start more than the autoscaler choice does.</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- GLOSSARY -->
+<section class="gloss">
+  <div class="wrap">
+    <div class="sec-label">For junior engineers</div>
+    <h2 class="sec-title">Glossary</h2>
+    <dl class="gloss-grid">
+      <div class="term"><dt>Cold start</dt><dd>The delay before a run can do real work: provisioning a node, pulling the container image, and connecting to the Dagster code server.</dd></div>
+      <div class="term"><dt>Warm capacity</dt><dd>Compute that's already running and ready, so a new run starts immediately instead of waiting on a cold start.</dd></div>
+      <div class="term"><dt>Karpenter</dt><dd>An autoscaler that provisions and removes Kubernetes nodes based on pending pods. Fast for an autoscaler, but still seconds-to-minutes per node.</dd></div>
+      <div class="term"><dt>KEDA</dt><dd>Event-driven autoscaler that scales pods on a signal like queue depth — here, how many runs are waiting in the broker.</dd></div>
+      <div class="term"><dt>Pause / balloon pod</dt><dd>A low-priority placeholder pod that holds a node's worth of headroom. A real run preempts it and gets an already-Ready node.</dd></div>
+      <div class="term"><dt>Broker</dt><dd>A queue (Redis/RabbitMQ) that holds tasks between the scheduler and the workers. Powerful, but a stateful thing you must operate.</dd></div>
+      <div class="term"><dt>Code server</dt><dd>A long-running gRPC process that holds your loaded Dagster code, so run pods stay thin and start fast.</dd></div>
+      <div class="term"><dt>k8s_job_executor</dt><dd>Dagster's recommended Kubernetes executor: each step runs as a Kubernetes Job. The path this runbook builds on.</dd></div>
+      <div class="term"><dt>Dispatch latency</dt><dd>Time from "run requested" to "first work executing." The metric that matters most at a 60-second cadence.</dd></div>
+      <div class="term"><dt>Consolidation</dt><dd>Karpenter removing or repacking under-used nodes to save money. At high cadence it can thrash and add latency.</dd></div>
+    </dl>
+    <p class="note">Tip for juniors: before tuning the autoscaler, confirm the persistent code server is up and images are pre-pulled. Those two things remove most of the cold-start tax regardless of which architecture you land on.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Runbook · Dagster autoscaling at 60s cadence · Rev A</span>
+    <span>Cost figures illustrative — replace with real inputs</span>
+  </div>
+</footer>
+
+</body>
+</html>
