@@ -1,0 +1,190 @@
+RUNBOOK · PLATFORM / AIOPS · CAPACITY
+Autoscaling for jobs that run every 60 seconds
+SYSTEM
+Dagster (OSS) on K8s
+CADENCE
+60s · short jobs
+DECISION
+Where to hold warm capacity
+STATUS
+Draft · Rev A
+THE ONE THING TO UNDERSTAND FIRST
+At a 60-second cadence, scale-to-zero saves nothing
+The idle gap between runs is seconds, not minutes. Anything that tears a node down and rebuilds it per run pays a cold-start tax on almost every run.
+ONE 60-SECOND CYCLE — TO SCALE (SECONDS)
+Run on warm capacity
+execute job ~18s idle gap ~42s
+Dispatch latency · warm pool
+<1s — capacity already up
+Cold start · provision a node
+node provision + image pull + code-server connect: 40s–120s
+60s — next run is due
+0s
+30s
+60s
+90s
+130s
+▲ The cold-start bar overruns the 60s boundary — the next run is queued before the last one is ready.
+So the real question is not "should we autoscale?" — it's how much warm capacity to hold, and where. Autoscaling only pays off if this job shares a cluster with bursty or larger periodic workloads that actually go quiet.
+FOR MANAGERS — READ THIS BOX
+Recommendation in three lines
+Hold warm capacity. Do not deprovision between runs.
+Default pick: Prewarmed Karpenter (warm headroom held by low-priority "pause" pods) running the Dagster Kubernetes executor, with a persistent code server and pre-pulled images. Stays on Dagster's recommended path, no message broker to operate, and node provisioning is off the critical path.
+Alternative: Celery + KEDA if — and only if — you have very high fan-out of many tiny steps, where packing them onto a few always-warm processes beats one pod per step. The cost is owning a broker.
+Avoid: Vanilla Karpenter that scales to zero. At this cadence it looks cheap on paper but pays a cold-start tax on nearly every run, for little real saving.
+Bottom line for budget: at 60s cadence all three options cost about the same per month (see cost model). The deciding factors are latency and operational burden, not autoscaling savings.
+SIDE BY SIDE
+The three architectures at a glance
+ARCHITECTURE
+HOW IT SCALES
+DISPATCH LATENCY
+BROKER?
+OPS BURDEN
+VERDICT
+Prewarmed Karpenter
+Pause pods reserve a node of headroom; a real run preempts one and schedules instantly, a replacement provisions in the background.
+LOW
+No
+Medium
+PICK
+Celery + KEDA
+Long-lived workers pull from a queue; KEDA scales the worker count on queue depth (min replicas held warm).
+LOW
+Yes
+High
+CONDITIONAL
+Vanilla Karpenter
+One pod per run; Karpenter provisions a node whenever a pod goes Pending, consolidates away when idle.
+HIGH
+No
+Low
+AVOID
+"Dispatch latency" = time from a run being requested to its first line of work executing. At 60s cadence this is the metric that matters most.
+COST MODEL — ILLUSTRATIVE
+What each option costs per month
+Worked example so the shape of the numbers is clear. Swap in your real inputs to get exact figures (see assumptions below).
+ARCHITECTURE
+WARM CAPACITY
+BROKER
+JOB COMPUTE
+EST. TOTAL / MO
+P95 DISPATCH
+Prewarmed Karpenter
+~1 node held
+≈ $70
+$0
+spillover
+≈ $10–20
+≈ $80–90
+~1–3S
+Celery + KEDA
+2 workers / 1 node
+≈ $70
+Redis
+≈ $25
+included
+≈ $95
+<1S
+Vanilla Karpenter
+$0 nominal
+$0
+~1 node-equiv
+anyway ≈ $70
+≈ $70 + churn
+40S–120S
+Assumptions: AWS on-demand, m6i.large ≈ $0.096/hr (~$70/mo run 24×7); job ≈ 18s, 3 concurrent runs, every 60s; Redis = cache.t4g.small. Key insight: at this cadence the "scale-to-zero" column still adds up to ~1 node running continuously, so vanilla Karpenter's apparent saving is mostly illusory — and it buys you the worst latency. Numbers move materially with: spot vs on-demand, region, instance family, real concurrency, and whether the cluster carries other workloads.
+THE DETAIL
+Each option, pros and cons
+01
+Prewarmed Karpenter
+RECOMMENDED
+Karpenter has no native warm-pool setting. You create headroom with low-PriorityClass pause ("balloon") pods that hold a node's worth of capacity. A real run pod preempts a pause pod and schedules onto the already-Ready node immediately; Karpenter then provisions a replacement in the background. Run pods stay thin by talking to a persistent gRPC code server, and images are pre-pulled by a DaemonSet.
+PROS
+	•	Node provisioning is off the critical path — runs start in seconds.
+	•	No broker to run; aligns with Dagster's recommended Kubernetes launcher + executor.
+	•	Precise bin-packing; warm headroom is just one extra node.
+CONS
+	•	More Karpenter + PriorityClass configuration to get right.
+	•	Pause pods reserve roughly a whole node that sits idle.
+	•	Still need pre-pull + persistent code server, or per-pod init creeps back in.
+Cost shape: warm headroom + actual job compute. Slightly more than a tightly-sized Celery pool because the reservation is coarser-grained.
+02
+Celery + KEDA
+CONDITIONAL
+Long-lived worker pods pull runs and steps off a broker (Redis list or RabbitMQ queue). KEDA scales the worker Deployment on queue depth, with a minReplicaCount held permanently warm. Because workers are already running with the code location loaded, dispatch is effectively instant.
+PROS
+	•	Workers stay warm — no pod scheduling, no image pull, code already loaded. Sub-second dispatch.
+	•	Multiplexes many tiny steps onto a few processes — compute-efficient for high fan-out.
+	•	Smallest, most predictable footprint for steady load.
+CONS
+	•	You own a broker + result backend: stateful, visibility-timeout tuning, lost-task semantics.
+	•	KEDA's ~30s default poll makes scale reactions laggy (mostly hidden if you hold min replicas).
+	•	Maintained but no longer Dagster's recommended K8s default — you swim against the current direction.
+Cost shape: small fixed warm pool + broker footprint. Cheapest for steady, high-fan-out load — if you accept the broker ops.
+03
+Vanilla Karpenter (scale-to-zero)
+AVOID HERE
+Each run is a Kubernetes Job/pod. Karpenter provisions a node whenever a pod goes Pending and consolidates nodes away when the cluster goes idle. K8s-native and broker-free — and the worst fit for a 60-second cadence.
+PROS
+	•	Simplest moving parts — no broker, no warm-pool config.
+	•	K8s-native and aligned with Dagster's recommended launcher.
+	•	Precise bin-packing when load is genuinely spiky.
+CONS
+	•	Node-Ready latency of 40s–2min lands on the critical path of nearly every run.
+	•	Even on a warm node you still pay per-pod image pull + code-server connect.
+	•	Aggressive consolidation thrashes nodes at this frequency.
+	•	"Pay only during execution" saving evaporates — utilization is near-constant anyway.
+Cost shape: looks cheapest, isn't. Churn overhead and near-100% utilization erase the saving, and you pay it back in latency.
+CHOOSE BY SITUATION
+Scenarios — pick the one that matches you
+A
+Steady every-60s job, modest fan-out, you want to stay on Dagster's path
+→ Prewarmed Karpenter + k8s executor, persistent code server, pre-pulled images.
+B
+Each run fans out into hundreds of tiny steps
+→ Celery + KEDA. Multiplexing tiny steps onto warm processes beats pod-per-step. Accept the broker.
+C
+This job shares a cluster with big, genuinely bursty workloads
+→ Autoscaling earns its keep. Keep a small warm floor for the 60s job, let Karpenter flex the rest.
+D
+You're tempted by "scale to zero to save money"
+→ Don't, at this cadence. Re-check the cost model — the saving is mostly illusory and latency suffers.
+QUICK DECISION GUIDE
+Answer these in order
+Q1
+Does each run fan out into very many tiny steps?
+YES → Celery + KEDA is worth the broker.  ·  NO → continue.
+Q2
+Is a message broker (Redis/RabbitMQ) something you want to run and own?
+NO → rule out Celery; use Karpenter family.  ·  YES → Celery stays on the table.
+Q3
+Can a run tolerate 40s–2min of startup delay?
+NO (typical) → you must hold warm capacity → Prewarmed Karpenter.  ·  YES → vanilla Karpenter is acceptable.
+Q4
+Did you add a persistent code server + image pre-pull?
+NO → do this first — it kills cold start more than the autoscaler choice does.
+FOR JUNIOR ENGINEERS
+Glossary
+Cold start
+The delay before a run can do real work: provisioning a node, pulling the container image, and connecting to the Dagster code server.
+Warm capacity
+Compute that's already running and ready, so a new run starts immediately instead of waiting on a cold start.
+Karpenter
+An autoscaler that provisions and removes Kubernetes nodes based on pending pods. Fast for an autoscaler, but still seconds-to-minutes per node.
+KEDA
+Event-driven autoscaler that scales pods on a signal like queue depth — here, how many runs are waiting in the broker.
+Pause / balloon pod
+A low-priority placeholder pod that holds a node's worth of headroom. A real run preempts it and gets an already-Ready node.
+Broker
+A queue (Redis/RabbitMQ) that holds tasks between the scheduler and the workers. Powerful, but a stateful thing you must operate.
+Code server
+A long-running gRPC process that holds your loaded Dagster code, so run pods stay thin and start fast.
+k8s_job_executor
+Dagster's recommended Kubernetes executor: each step runs as a Kubernetes Job. The path this runbook builds on.
+Dispatch latency
+Time from "run requested" to "first work executing." The metric that matters most at a 60-second cadence.
+Consolidation
+Karpenter removing or repacking under-used nodes to save money. At high cadence it can thrash and add latency.
+Tip for juniors: before tuning the autoscaler, confirm the persistent code server is up and images are pre-pulled. Those two things remove most of the cold-start tax regardless of which architecture you land on.
+Runbook · Dagster autoscaling at 60s cadence · Rev A
+Cost figures illustrative — replace with real inputs
