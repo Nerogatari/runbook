@@ -1,0 +1,842 @@
+Dagster OSS on EKS — Multi-Project Platform Runbook
+
+Scope: Production-ready reference for running Dagster OSS on EKS with multiple data science / ingestion projects, two Helm charts (platform + code-location), two ArgoCD ApplicationSets with git-file-generator seeding, Kargo image promotion, and dg workspace local dev.
+
+Version discipline: Dagster core 1.13.x, integration libs 0.29.x, pinned in one place (platform_common). Webserver/daemon and every code-location image MUST run the same core minor version.
+
+Design principles:
+1. One image per project = dependency isolation (torch vs. legacy sklearn never conflict).
+2. One generic code-location chart, instantiated N times by a values file per project per env. The values file is the onboarding seed.
+3. All env/project differences are injected env vars (EnvVar() in code, ConfigMap/ExternalSecret in K8s, .env locally). Zero if env  "prod" in Python.
+4. Platform and code locations are decoupled through one contract: the dagster-workspace ConfigMap.
+⸻
+1. Architecture
+
+                        ┌──────────────────────────────────────────────┐
+                        │  ArgoCD                                      │
+                        │  AppSet #1: platform  (generator: envs)      │
+                        │  AppSet #2: locations (generator: git files  │
+                        │             projects/*/deploy/values-*.yaml) │
+                        └───────────────┬──────────────────────────────┘
+                                        │ sync
+        namespace: dagster-<env>        ▼
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │  PLATFORM (chart: platform, wraps official dagster chart)           │
+ │   ├── dagster-webserver ──reads── ConfigMap: dagster-workspace      │
+ │   ├── dagster-daemon    (QueuedRunCoordinator, K8sRunLauncher)      │
+ │   └── instance: RDS Postgres + S3 compute logs (dagster.yaml        │
+ │       fully generated from Helm values — never hand-edited)         │
+ │                                                                     │
+ │  CODE LOCATIONS (chart: code-location, one release per project)     │
+ │   ├── ds-churn        gRPC :4000  (image: ecr/ds-churn:<sha>)       │
+ │   ├── ds-forecasting  gRPC :4000  (image: ecr/ds-forecasting:<sha>) │
+ │   └── ingestion       gRPC :4000  (image: ecr/ingestion:<sha>)      │
+ │        │                                                            │
+ │        └── K8sRunLauncher spawns run pods FROM THE SAME IMAGE,      │
+ │            with env/secrets/resources propagated via                │
+ │            DAGSTER_CLI_API_GRPC_CONTAINER_CONTEXT                   │
+ └─────────────────────────────────────────────────────────────────────┘
+
+ Image flow:  git push → CI (path-filtered matrix) → ECR
+              → Kargo Warehouse detects tag → Stage dev (auto) writes
+                tag into values-dev.yaml → Stage prod (gated) writes
+                tag into values-prod.yaml → ArgoCD syncs
+
+
+Namespace rule: platform + all code locations of one environment live in the same namespace (dagster-dev, dagster-prod). The run launcher, instance ConfigMap, and Postgres secret references assume this. Do not split.
+⸻
+2. Repository layout (monorepo)
+
+dagster-platform-repo/
+├── dg.toml                          # dg workspace root (local dev)
+├── libs/
+│   └── platform_common/             # shared, versioned, pinned
+│       ├── pyproject.toml
+│       └── src/platform_common/
+│           ├── resources.py         # S3 IO manager, warehouse resources
+│           ├── config.py            # shared Pydantic Config classes
+│           └── factories.py         # schedule/sensor factories
+├── projects/
+│   ├── ds-churn/
+│   │   ├── pyproject.toml           # own deps, own uv.lock
+│   │   ├── uv.lock
+│   │   ├── Dockerfile
+│   │   ├── .env.example             # mirrors ConfigMap keys
+│   │   ├── src/ds_churn/
+│   │   │   └── definitions.py
+│   │   └── deploy/
+│   │       ├── values-dev.yaml      # ← AppSet #2 seed (dev)
+│   │       └── values-prod.yaml     # ← AppSet #2 seed (prod)
+│   ├── ds-forecasting/              # same shape
+│   └── ingestion/                   # same shape
+├── charts/
+│   ├── platform/                    # wrapper around official dagster chart
+│   │   ├── Chart.yaml
+│   │   └── values/
+│   │       ├── values-dev.yaml
+│   │       └── values-prod.yaml
+│   ├── code-location/               # generic, written once (§5)
+│   │   ├── Chart.yaml
+│   │   ├── values.yaml
+│   │   └── templates/
+│   │       ├── _helpers.tpl
+│   │       ├── deployment.yaml
+│   │       ├── service.yaml
+│   │       ├── configmap.yaml
+│   │       └── externalsecret.yaml
+│   └── workspace-configmap/         # renders dagster-workspace CM (§6)
+│       ├── Chart.yaml
+│       ├── values-dev.yaml
+│       ├── values-prod.yaml
+│       └── templates/configmap.yaml
+├── deploy/
+│   ├── argocd/
+│   │   ├── appset-platform.yaml
+│   │   ├── appset-locations-dev.yaml
+│   │   └── appset-locations-prod.yaml
+│   └── kargo/
+│       ├── project.yaml
+│       └── ds-churn/                # warehouse + stages per project
+├── .github/workflows/build-images.yaml
+└── Makefile
+
+⸻
+3. Shared library: platform_common
+
+This package is the compatibility layer. It pins dagster core so projects cannot drift, and it must include the instance/storage deps that both the gRPC server process and the launched run pods need at runtime.
+
+libs/platform_common/pyproject.toml:
+
+[project]
+name = "platform-common"
+version = "0.4.0"
+requires-python = ">=3.12"
+dependencies = [
+    "dagster1.13.*",          # THE core pin — projects inherit this
+    "dagster-postgres0.29.*", # REQUIRED in every image: code servers and
+    "dagster-aws0.29.*",      # run pods talk to the instance (RDS + S3)
+    "dagster-k8s0.29.*",
+    "pydantic>=2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+Why dagster-postgres/aws in every image: sensor and schedule evaluation executes inside the code-location gRPC process using an instance ref passed by the daemon; run pods write events straight to Postgres and logs to S3. If a project image lacks these libs, sensors and runs fail with import errors that look like platform problems. Bake them into the shared pin and forget about it.
+
+libs/platform_common/src/platform_common/resources.py (pattern excerpt):
+
+from dagster import ConfigurableResource, EnvVar
+from dagster_aws.s3 import S3PickleIOManager, S3Resource
+
+
+class HttpSourceConfig(ConfigurableResource):
+    """Generic ingestion source. Per-project values come from env."""
+    endpoint: str
+    bucket: str
+    api_key: str
+
+
+def make_s3_io_manager(prefix_env: str = "S3_IO_PREFIX"):
+    return S3PickleIOManager(
+        s3_resource=S3Resource(region_name=EnvVar("AWS_REGION")),
+        s3_bucket=EnvVar("DAGSTER_IO_BUCKET"),
+        s3_prefix=EnvVar(prefix_env),
+    )
+
+⸻
+4. Project scaffold
+
+4.1 projects/ds-churn/pyproject.toml
+
+[project]
+name = "ds-churn"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "platform-common",        # path dep locally, vendored in image
+    "scikit-learn>=1.5",      # project-specific deps live HERE, freely
+    "polars>=1.0",
+]
+
+[tool.uv.sources]
+platform-common = { path = "../../libs/platform_common", editable = true }
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "ds_churn"
+
+
+4.2 projects/ds-churn/src/ds_churn/definitions.py
+
+from dagster import Definitions, EnvVar
+from platform_common.resources import HttpSourceConfig, make_s3_io_manager
+
+from ds_churn.assets import all_assets
+
+defs = Definitions(
+    assets=all_assets,
+    resources={
+        "io_manager": make_s3_io_manager(),
+        "source": HttpSourceConfig(
+            endpoint=EnvVar("CHURN_SRC_ENDPOINT"),
+            bucket=EnvVar("CHURN_RAW_BUCKET"),
+            api_key=EnvVar("CHURN_API_KEY"),
+        ),
+    },
+)
+
+
+EnvVar resolves at run-launch time, not import time — same code works with .env locally and ConfigMap/Secret on EKS, and secrets never bake into snapshots.
+
+4.3 projects/ds-churn/Dockerfile
+
+FROM python:3.12-slim AS base
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+# Shared lib first (better layer caching when only project code changes)
+COPY libs/platform_common /libs/platform_common
+COPY projects/ds-churn/pyproject.toml projects/ds-churn/uv.lock ./
+RUN uv sync --frozen --no-install-project
+
+COPY projects/ds-churn/src ./src
+RUN uv sync --frozen
+
+ENV PATH="/app/.venv/bin:$PATH"
+EXPOSE 4000
+# NOTE: no CMD args for host/port here that differ per env — keep it static
+CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "4000", \
+     "-m", "ds_churn.definitions"]
+
+
+Build context is the repo root (so libs/ is copyable): docker build -f projects/ds-churn/Dockerfile .
+
+4.4 The seed: projects/ds-churn/deploy/values-prod.yaml
+
+This single file is everything ArgoCD needs to deploy the location. Committing it is the deployment action.
+
+locationName: ds-churn
+moduleName: ds_churn.definitions
+
+image:
+  repository: 123456789012.dkr.ecr.us-west-2.amazonaws.com/dagster/ds-churn
+  tag: "git-0000000"            # managed by Kargo — do not hand-edit in prod
+
+codeServer:
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { memory: 1Gi }
+
+# Non-secret, per-project, per-env config → ConfigMap → pod env
+env:
+  AWS_REGION: us-west-2
+  DAGSTER_IO_BUCKET: srca-aiops-dagster-prod
+  S3_IO_PREFIX: ds-churn
+  CHURN_SRC_ENDPOINT: https://api.vendor.com/v2
+  CHURN_RAW_BUCKET: srca-aiops-raw-prod
+
+# Secrets via External Secrets Operator → K8s Secret → pod env
+secrets:
+  enabled: true
+  storeRef: aws-parameter-store        # ClusterSecretStore name
+  items:
+    - envName: CHURN_API_KEY
+      remoteKey: /dagster/prod/ds-churn/api-key
+
+# Propagated to RUN PODS (not the gRPC server) via container context
+runK8sConfig:
+  container_config:
+    resources:
+      requests: { cpu: "1", memory: 4Gi }
+      limits:   { memory: 8Gi }
+  pod_spec_config:
+    node_selector: { workload: batch }
+
+serviceAccount: dagster-code-location   # IRSA role with S3 + source access
+
+
+Name mapping to your actual repo (aiops-dagster): in this document platform_common = your shared package, ds-churn = your data_science project, and 1.13.* should be your exact 1.13.5 pin (exact pins + full uv.lock resolution is strictly better — keep it). One adjustment worth making: your data-science package currently depends on dagster-webserver and dagster-dg-cli. Those are needed for local dg dev only, not for the gRPC image. Move them to a dev group so the production image stays lean:
+
+[dependency-groups]
+dev = ["dagster-webserver1.13.5", "dagster-dg-cli1.13.5"]
+
+
+Then in the Dockerfile use uv sync --frozen --no-dev. Locally, uv sync installs everything.
+⸻
+5. Chart: code-location (write once, instantiate N times)
+
+5.1 charts/code-location/Chart.yaml
+
+apiVersion: v2
+name: code-location
+description: Generic Dagster OSS gRPC code location
+version: 1.0.0
+
+
+5.2 charts/code-location/values.yaml (defaults / schema)
+
+locationName: ""            # REQUIRED
+moduleName: ""              # REQUIRED, e.g. data_science.definitions
+image:
+  repository: ""
+  tag: ""
+codeServer:
+  replicas: 1
+  port: 4000
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+env: {}
+secrets:
+  enabled: false
+  storeRef: aws-parameter-store
+  storeKind: ClusterSecretStore
+  items: []                 # [{envName, remoteKey}]
+runK8sConfig: {}            # merged into launched run pods
+serviceAccount: dagster-code-location
+
+
+5.3 charts/code-location/templates/_helpers.tpl
+
+{{/*
+Container context propagated to run pods. This is the OSS mechanism the
+official chart uses under includeConfigInLaunchedRuns: the K8sRunLauncher
+reads DAGSTER_CLI_API_GRPC_CONTAINER_CONTEXT from the code server and
+applies env_config_maps / env_secrets / run_k8s_config to every run pod
+launched for this location. Without this, run pods get NO project env.
+*/}}
+{{- define "codeLocation.containerContext" -}}
+{{- $secrets := list -}}
+{{- if .Values.secrets.enabled -}}
+{{- $secrets = list (printf "%s-secrets" .Values.locationName) -}}
+{{- end -}}
+{{- $k8s := dict
+      "namespace" .Release.Namespace
+      "service_account_name" .Values.serviceAccount
+      "env_config_maps" (list (printf "%s-env" .Values.locationName))
+      "env_secrets" $secrets
+      "run_k8s_config" (.Values.runK8sConfig | default dict)
+-}}
+{{- dict "k8s" $k8s | toJson -}}
+{{- end -}}
+
+
+5.4 charts/code-location/templates/deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.locationName }}-code
+  labels:
+    app.kubernetes.io/name: dagster-code-location
+    app.kubernetes.io/instance: {{ .Values.locationName }}
+spec:
+  replicas: {{ .Values.codeServer.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Values.locationName }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dagster-code-location
+        app.kubernetes.io/instance: {{ .Values.locationName }}
+      annotations:
+        # Roll the pod when project env changes — otherwise stale config
+        checksum/env: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount }}
+      containers:
+        - name: grpc
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: {{ .Values.codeServer.port }}
+          env:
+            # Run pods use THIS image. Without it, K8sRunLauncher fails.
+            - name: DAGSTER_CURRENT_IMAGE
+              value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+            - name: DAGSTER_CLI_API_GRPC_CONTAINER_CONTEXT
+              value: {{ include "codeLocation.containerContext" . | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.locationName }}-env
+            {{- if .Values.secrets.enabled }}
+            - secretRef:
+                name: {{ .Values.locationName }}-secrets
+            {{- end }}
+          readinessProbe:
+            exec:
+              command: ["dagster", "api", "grpc-health-check",
+                        "-p", "{{ .Values.codeServer.port }}"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.codeServer.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.codeServer.resources | nindent 12 }}
+
+
+5.5 charts/code-location/templates/service.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.locationName }}-code
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Values.locationName }}
+  ports:
+    - port: {{ .Values.codeServer.port }}
+      targetPort: {{ .Values.codeServer.port }}
+
+
+5.6 charts/code-location/templates/configmap.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.locationName }}-env
+data:
+{{- range $k, $v := .Values.env }}
+  {{ $k }}: {{ $v | toString | quote }}
+{{- end }}
+
+
+5.7 charts/code-location/templates/externalsecret.yaml
+
+{{- if .Values.secrets.enabled }}
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ .Values.locationName }}-secrets
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: {{ .Values.secrets.storeRef }}
+    kind: {{ .Values.secrets.storeKind }}
+  target:
+    name: {{ .Values.locationName }}-secrets
+  data:
+  {{- range .Values.secrets.items }}
+    - secretKey: {{ .envName }}
+      remoteRef:
+        key: {{ .remoteKey }}
+  {{- end }}
+{{- end }}
+
+⸻
+6. Chart: workspace-configmap (the platform↔locations contract)
+
+Deliberately its own tiny chart + its own ArgoCD Application, so adding a location never requires touching the platform release.
+
+6.1 charts/workspace-configmap/values-prod.yaml
+
+locations:
+  - data-science
+  - ingestion
+
+
+One line per project. This and the seed values file are the only two things you commit to onboard a project.
+
+6.2 charts/workspace-configmap/templates/configmap.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dagster-workspace      # name is load-bearing — referenced by platform
+data:
+  workspace.yaml: |
+    load_from:
+    {{- range .Values.locations }}
+      - grpc_server:
+          host: {{ . }}-code
+          port: 4000
+          location_name: {{ . }}
+    {{- end }}
+
+⸻
+7. Chart: platform (wrapper over the official Dagster chart)
+
+7.1 charts/platform/Chart.yaml
+
+apiVersion: v2
+name: platform
+version: 1.0.0
+dependencies:
+  - name: dagster
+    version: "1.13.5"          # MUST equal the pin in shared/uv.lock
+    repository: https://dagster-io.github.io/helm
+
+
+7.2 charts/platform/values/values-prod.yaml
+
+dagster:
+  dagster-user-deployments:
+    enabled: false             # locations are managed by AppSet #2, not here
+
+  dagsterWebserver:
+    workspace:
+      enabled: true
+      externalConfigmap: dagster-workspace   # the §6 contract
+    annotations:
+      # Restart webserver when the workspace CM changes (stakater reloader).
+      # Without this, new locations don't appear until manual restart.
+      configmap.reloader.stakater.com/reload: "dagster-workspace"
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+
+  dagsterDaemon:
+    annotations:
+      configmap.reloader.stakater.com/reload: "dagster-workspace"
+    runCoordinator:
+      enabled: true
+      type: QueuedRunCoordinator
+      config:
+        queuedRunCoordinator:
+          maxConcurrentRuns: 20
+          tagConcurrencyLimits:
+            - key: dagster/code-location
+              limit: 5
+              value: { applyLimitPerUniqueValue: true }
+
+  runLauncher:
+    type: K8sRunLauncher
+    config:
+      k8sRunLauncher:
+        loadInclusterConfig: true
+        jobNamespace: dagster-prod
+        # envSecrets here apply to ALL run pods (e.g. the pg secret):
+        envSecrets:
+          - name: dagster-postgresql-secret
+
+  postgresql:
+    enabled: false             # RDS, never in-cluster for prod
+    postgresqlHost: aiops-dagster-prod.xxxx.us-west-2.rds.amazonaws.com
+    postgresqlUsername: dagster
+    postgresqlDatabase: dagster
+    service: { port: 5432 }
+  generatePostgresqlPasswordSecret: false
+  global:
+    postgresqlSecretName: dagster-postgresql-secret   # via ExternalSecret
+
+  computeLogManager:
+    type: S3ComputeLogManager
+    config:
+      s3ComputeLogManager:
+        bucket: srca-aiops-dagster-prod
+        prefix: compute-logs
+        region: us-west-2
+        skipEmptyFiles: true
+
+  migrate:
+    enabled: false             # flip to true ONLY during version upgrades
+
+
+dagster.yaml is now 100% Helm-rendered. You never edit it by hand; you edit values and let Argo sync.
+⸻
+8. ArgoCD ApplicationSets
+
+8.1 AppSet #1 — platform (+ workspace CM), generator over envs
+
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: dagster-platform
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - list:
+        elements:
+          - env: dev
+            cluster: https://kubernetes.default.svc
+          - env: prod
+            cluster: https://kubernetes.default.svc
+  template:
+    metadata:
+      name: "dagster-platform-{{ .env }}"
+    spec:
+      project: dagster
+      sources:
+        - repoURL: https://github.com/srca/aiops-dagster
+          targetRevision: main
+          path: charts/platform
+          helm:
+            valueFiles: ["values/values-{{ .env }}.yaml"]
+        - repoURL: https://github.com/srca/aiops-dagster
+          targetRevision: main
+          path: charts/workspace-configmap
+          helm:
+            valueFiles: ["values-{{ .env }}.yaml"]
+      destination:
+        server: "{{ .cluster }}"
+        namespace: "dagster-{{ .env }}"
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions: [CreateNamespace=true]
+
+
+8.2 AppSet #2 — code locations, git file generator (the seed)
+
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: dagster-locations-prod
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://github.com/srca/aiops-dagster
+        revision: main
+        files:
+          - path: "projects/*/deploy/values-prod.yaml"
+  template:
+    metadata:
+      # locationName comes straight from the seed file's content
+      name: "dg-loc-{{ .locationName }}-prod"
+    spec:
+      project: dagster
+      source:
+        repoURL: https://github.com/srca/aiops-dagster
+        targetRevision: main
+        path: charts/code-location
+        helm:
+          valueFiles: ["../../{{ .path.path }}/values-prod.yaml"]
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: dagster-prod
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+
+
+Duplicate once as dagster-locations-dev with values-dev.yaml and dagster-dev. The git file generator flattens the seed file's fields into template params — that's why {{ .locationName }} works and why the seed file needs no registration anywhere else.
+⸻
+9. CI — path-filtered matrix builds
+
+.github/workflows/build-images.yaml:
+
+name: build-images
+on:
+  push:
+    branches: [main]
+    paths: ["projects/**", "libs/**"]
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.diff.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - id: diff
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          if echo "$CHANGED" | grep -q '^libs/'; then
+            # shared lib changed → rebuild everything on the same pin
+            PROJECTS=$(ls -d projects/*/ | xargs -n1 basename)
+          else
+            PROJECTS=$(echo "$CHANGED" | grep '^projects/' \
+                       | cut -d/ -f2 | sort -u)
+          fi
+          echo "projects=$(echo $PROJECTS | jq -R 'split(" ")' -c)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.projects != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: ${{ fromJson(needs.detect.outputs.projects) }}
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate lockfile is in sync
+        run: |
+          pip install uv
+          cd projects/${{ matrix.project }} && uv lock --check
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/gha-ecr-push
+          aws-region: us-west-2
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push
+        run: |
+          IMG=123456789012.dkr.ecr.us-west-2.amazonaws.com/dagster/${{ matrix.project }}
+          TAG=git-${GITHUB_SHA::7}
+          docker build -f projects/${{ matrix.project }}/Dockerfile \
+            -t $IMG:$TAG .
+          docker push $IMG:$TAG
+
+
+CI only builds and pushes. It never edits values files — tag propagation is Kargo's job. This separation is what keeps rollbacks a one-line git revert.
+⸻
+
+10. Kargo — image promotion (dev auto, prod gated)
+
+One Warehouse + two Stages per project. Kargo watches ECR, writes the tag into the seed values file, and Argo does the rest.
+
+deploy/kargo/project.yaml:
+
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Project
+metadata:
+  name: aiops-dagster
+
+
+deploy/kargo/data-science/warehouse.yaml:
+
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: data-science
+  namespace: aiops-dagster
+spec:
+  subscriptions:
+    - image:
+        repoURL: 123456789012.dkr.ecr.us-west-2.amazonaws.com/dagster/data-science
+        imageSelectionStrategy: NewestBuild
+        allowTags: ^git-
+
+
+deploy/kargo/data-science/stage-dev.yaml:
+
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: data-science-dev
+  namespace: aiops-dagster
+spec:
+  requestedFreight:
+    - origin: { kind: Warehouse, name: data-science }
+      sources: { direct: true }
+  promotionTemplate:
+    spec:
+      steps:
+        - uses: git-clone
+          config:
+            repoURL: https://github.com/srca/aiops-dagster
+            checkout: [{ branch: main, path: ./repo }]
+        - uses: yaml-update
+          config:
+            path: ./repo/projects/data-science/deploy/values-dev.yaml
+            updates:
+              - key: image.tag
+                value: ${{ imageFrom("123456789012.dkr.ecr.us-west-2.amazonaws.com/dagster/data-science").Tag }}
+        - uses: git-commit
+          config:
+            path: ./repo
+            message: "kargo: data-science dev → ${{ imageFrom(\"123456789012.dkr.ecr.us-west-2.amazonaws.com/dagster/data-science\").Tag }}"
+        - uses: git-push
+          config: { path: ./repo }
+        - uses: argocd-update
+          config:
+            apps: [{ name: dg-loc-data-science-dev }]
+
+
+stage-prod.yaml is identical except: requestedFreight[0].sources: { stages: [data-science-dev] } (freight must pass through dev first), the yaml-update path targets values-prod.yaml, and no auto-promotion policy — promotion is a manual click/kargo promote, which is your prod gate. Optionally attach an AnalysisTemplate verification on the dev stage (e.g., a smoke job that materializes one canary asset) so freight is only prod-eligible after a green check.
+
+Kargo has no ApplicationSet-style generator yet, so the per-project manifests are stamped from a template — add a make kargo-scaffold PROJECT=x target that renders warehouse + two stages with envsubst. Verify step syntax against your installed Kargo minor version; the steps API stabilized in v1 but field names have shifted between minors.
+⸻
+11. Local development (dg workspace)
+
+Root dg.toml:
+
+directory_type = "workspace"
+
+[workspace]
+[[workspace.projects]]
+path = "projects/data-science"
+[[workspace.projects]]
+path = "projects/ingestion"
+
+
+Daily loop for a DS engineer:
+
+cd projects/data-science
+cp .env.example .env        # fill in local values, same keys as the ConfigMap
+uv sync                     # installs dev group incl. dagster-webserver
+cd ../.. && dg dev          # all locations, one UI, per-project venvs
+
+
+Rules that keep local↔EKS parity exact:
+
+- .env.example in every project is the authoritative list of required env vars. The seed values file (env: + secrets.items[].envName) must cover the same keys. A 10-line CI script can diff the two and fail the PR on drift — cheap insurance against "works locally, crashes on EKS."
+- Local uses SQLite instance + filesystem IO by default under dg dev; if an asset needs S3 locally, point DAGSTER_IO_BUCKET at a dev bucket in .env. No code changes either way.
+- Never run the webserver from a project venv against prod Postgres. Local is local.
+⸻
+12. Onboarding checklist — new project (~15 min, one PR)
+
+1. uvx create-dagster@latest project projects/<name> (adds itself to dg.toml).
+2. Add platform-common/shared path dep + your project deps → uv lock.
+3. Copy a neighbor's Dockerfile, change the module name.
+4. Write deploy/values-dev.yaml + deploy/values-prod.yaml (the seeds). Tag can start at any pushed image.
+5. Add one line to charts/workspace-configmap/values-{dev,prod}.yaml.
+6. Create the SSM/Parameter Store entries referenced in secrets.items.
+7. make kargo-scaffold PROJECT=<name>.
+8. Merge. CI builds the image, AppSet #2 creates the Application, reloader restarts the webserver, location appears.
+
+Nothing in the platform chart, ArgoCD config, or CI pipeline is touched. That's the low-toil payoff.
+⸻
+13. Day-2 operations
+
+Dagster upgrade (e.g. 1.13.5 → 1.14.x) — the only genuinely careful procedure:
+
+1. One PR: bump dagster== pin in shared, run make lock-all (re-locks every project), bump charts/platform/Chart.yaml dependency version to match.
+2. Merge → CI rebuilds all images (libs/ change triggers full matrix).
+3. Promote all locations through dev via Kargo; verify.
+4. Prod order: set migrate.enabled: true on platform → sync platform (runs dagster instance migrate job) → promote all locations → set migrate.enabled: false.
+5. Never leave webserver and code servers skewed across a minor version overnight.
+
+Rollback one project: git revert the Kargo tag-bump commit for that seed file (or promote older freight). Argo self-heals. Platform and other projects untouched.
+
+Rollback platform: revert the platform values/chart PR. Note: instance schema migrations are forward-only — snapshot RDS before step 4 above.
+
+Lockfile hygiene (your 2500-line locks): the lock is the contract; treat it as code. uv lock --check in CI (already in §9) blocks drift. Use Renovate/Dependabot grouped monthly PRs for non-dagster deps per project; dagster-family bumps only ever happen via the shared pin + lock-all so versions can never fork between projects. Makefile:
+
+lock-all:
+	for p in projects/*/; do (cd $$p && uv lock); done
+
+
+Observability minimums: alert on daemon heartbeat (webserver /server_info + daemon liveness), code-location readiness (a location down = its sensors/schedules silently stopped), QueuedRunCoordinator queue depth, and RDS connections (each code server + run pod holds connections — set max_connections headroom and consider RDS Proxy past ~10 locations).
+⸻
+14. Troubleshooting
+Symptom	Cause	Fix
+New location not in UI	Webserver hasn't re-read workspace CM	Reloader annotation missing (§7.2), or restart deploy/dagster-webserver
+Location shows "loading error" after deploy	Rollout race: webserver hit gRPC before ready	Readiness probe (§5.4) prevents; click "Reload" in UI
+Sensors fail with ModuleNotFoundError: dagster_postgres	Instance libs missing from project image	They belong in shared deps (§3) — never per-project
+Run pods start but have no project env/secrets	Container context env missing on code server	DAGSTER_CLI_API_GRPC_CONTAINER_CONTEXT (§5.3/5.4)
+Run pod uses wrong/latest image	DAGSTER_CURRENT_IMAGE not set	§5.4
+gRPC errors on large asset graphs	Default 50MB message cap	Set DAGSTER_GRPC_MAX_RX_BYTES (e.g. 104857600) on webserver, daemon, and code servers
+Deserialization error / snapshot mismatch	Version skew webserver vs code server	Re-align to the single pin; check image.tag vs platform chart version
+Everything vanished from UI at once	Workspace CM renamed/deleted	CM name dagster-workspace is load-bearing (§6.2) — keep stable across refactors
+Runs stuck QUEUED	Concurrency limits or daemon down	Check daemon logs + coordinator config (§7.2)
+Run pods Pending forever	runK8sConfig nodeSelector matches no nodes / no Karpenter provisioner	Fix selector or provisioner requirements
+Secret env empty in pod	ExternalSecret not synced	kubectl describe externalsecret <loc>-secrets; check ClusterSecretStore IRSA
+CI green, EKS crashloop on import	.env.example ↔ values drift	Run the parity check (§11); missing key in env: map
+uv sync --frozen fails in Docker	pyproject changed without re-lock	uv lock --check gate (§9) should have caught it pre-merge
+⸻
+Appendix A — Env var naming convention
+
+<PROJECT>_<PURPOSE> for project-scoped (CHURN_SRC_ENDPOINT), bare names for platform-wide (AWS_REGION, DAGSTER_IO_BUCKET). Secrets always flow via ExternalSecret, never in env: maps or .env committed files. .env is gitignored; .env.example is committed with empty/dummy values and is the parity contract.
+
+Appendix B — What you commit for common actions
+Action	Files touched
+New project	project dir + 2 seed values + 1 workspace line + kargo scaffold
+Config change (non-secret)	1 seed values file
+Secret rotation	Parameter Store only (ESO refreshes ≤1h)
+Deploy new code to dev	nothing — CI + Kargo automatic
+Promote to prod	zero files — Kargo promote (gated)
+Scale run resources	runK8sConfig in 1 seed file
+Dagster upgrade	1 PR: shared pin + Chart.yaml + lock-all
