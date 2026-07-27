@@ -1,0 +1,874 @@
+# Dagster × OpenTelemetry — Integration Wiki
+
+> Target: Dagster OSS on EKS. As of 2026-07 Dagster has **no first-party OTel integration**. Everything below is DIY, but all of it works.
+
+---
+
+## 0. TL;DR
+
+| | Airflow | Dagster OSS |
+|---|---|---|
+| Official OTel **metrics** | ✅ built in (2.7+, `[metrics] otel_on = True`) | ❌ none |
+| Official OTel **traces** | ✅ built in (2.10+, `[traces] otel_on`, experimental) | ❌ none |
+| Official OTel **logs** | ⚠️ partial | ❌ none |
+| Auto-instrumentation | works | works (it's just a Python process) |
+| Upstream tracking | — | [#11191](https://github.com/dagster-io/dagster/issues/11191) (open since Dec 2022), [#12353](https://github.com/dagster-io/dagster/issues/12353) |
+
+**Verdict: yes, you can — but there is no `otel_on = True` switch.** You build four layers:
+
+| Layer | What | Code changes |
+|---|---|---|
+| **L0** Infrastructure | OTel Collector + k8s metadata + kube-state-metrics | none |
+| **L1** Process instrumentation | `opentelemetry-instrument` on webserver / daemon / code servers | Dockerfile only |
+| **L2** Business spans | tracer inside assets/ops, **context propagation via run tags** | pipeline code |
+| **L3** Derived metrics | `run_status_sensor` → OTLP metrics | definitions code |
+
+⚠️ **Naming trap:** Dagster's docs page at `docs.dagster.io/about/telemetry` describes **Dagster's own anonymous usage statistics** sent back to Dagster Labs. It has nothing to do with observability. `DAGSTER_DISABLE_TELEMETRY` is not the knob you're looking for.
+
+---
+
+## 1. Why Dagster is harder than Airflow
+
+Airflow's scheduler is **one long-lived process** that every task lifecycle passes through. Instrument that one place and you cover everything. That's why Airflow could ship a config flag.
+
+Dagster on Kubernetes is **aggressively distributed**:
+
+```
+dagster-webserver   (Starlette/uvicorn, GraphQL)  ──┐
+dagster-daemon      (schedules, sensors,            │
+                     run queue, backfills)       ───┼── Postgres (event log)
+code location gRPC servers  (one per project)    ───┘   S3 (compute logs)
+        │
+        │  K8sRunLauncher creates a Kubernetes Job
+        ▼
+   Run Pod  ─ one per run, new process, new container
+        │
+        │  k8s_job_executor creates another Kubernetes Job per step
+        ▼
+   Step Pod ─ one per op/asset, lifetime can be < 5 seconds
+```
+
+Three consequences, all of which have solutions later in this doc:
+
+1. **Trace context does not survive process boundaries.** The daemon triggers a run, the run pod executes it, step pods execute individual assets. That's three processes in three containers. This is the hard part and gets its own section (§5).
+2. **Short-lived processes drop spans.** `BatchSpanProcessor` flushes every 5s by default. A step pod that runs for 3 seconds exits with its buffer full and unsent.
+3. **Cardinality explodes if you're careless.** `run_id` is a UUID. Fine as a span attribute. Putting it on a metric will destroy your Prometheus/Mimir instance.
+
+---
+
+## 2. L0 — Infrastructure layer (do this first)
+
+Highest value per unit of effort, and it's a prerequisite for everything else. Zero Dagster changes.
+
+### 2.1 Collector topology
+
+Two deployment options on EKS:
+
+| Option | When |
+|---|---|
+| **OpenTelemetry Operator** | Recommended. CRD-managed Collectors, plus the `Instrumentation` CRD for zero-touch Python auto-injection (§3.2) |
+| **ADOT (AWS Distro for OpenTelemetry)** | If your backend is CloudWatch / AMP / X-Ray — the EKS add-on path is smoother |
+
+Use an **agent + gateway** split:
+
+```
+[Dagster pods] --OTLP/gRPC:4317--> [Collector DaemonSet: agent]
+                                          │  k8sattributes, resourcedetection
+                                          ▼
+                                   [Collector Deployment: gateway]
+                                          │  tail_sampling, batch
+                                          ▼
+                          Tempo / Jaeger / AMP / Datadog / SigNoz
+```
+
+The agent must be a **DaemonSet**, not a Deployment. The `k8sattributes` processor resolves pod IP → pod metadata, and step pods are so short-lived that you want the minimum number of network hops before the span is safely buffered off-pod.
+
+### 2.2 Collector config skeleton
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: kube-state-metrics
+          static_configs:
+            - targets: ['kube-state-metrics.kube-system:8080']
+
+processors:
+  k8sattributes:
+    auth_type: serviceAccount
+    passthrough: false
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.job.name          # Dagster run pods ARE Kubernetes Jobs — critical
+        - k8s.node.name
+      labels:
+        - tag_name: dagster.run_id
+          key: dagster/run-id
+          from: pod
+        - tag_name: dagster.code_location
+          key: dagster/code-location
+          from: pod
+  resourcedetection:
+    detectors: [env, eks, ec2]
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+  # Cardinality guard: strip UUID-ish attributes from METRICS only
+  attributes/strip-cardinality:
+    actions:
+      - key: dagster.run_id
+        action: delete
+      - key: dagster.step_key
+        action: delete
+
+exporters:
+  otlp/gateway:
+    endpoint: otel-gateway.observability:4317
+    tls: { insecure: true }
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [k8sattributes, resourcedetection, batch]
+      exporters: [otlp/gateway]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [k8sattributes, resourcedetection, attributes/strip-cardinality, batch]
+      exporters: [otlp/gateway]
+    logs:
+      receivers: [otlp]
+      processors: [k8sattributes, batch]
+      exporters: [otlp/gateway]
+```
+
+### 2.3 What you get for free
+
+Once the Collector is running, without touching Dagster at all:
+
+| Signal | Source |
+|---|---|
+| Run pod CPU / memory / OOMKilled | kubelet + cAdvisor |
+| Run failure | `kube_job_status_failed` (a failed run = a failed K8s Job) |
+| Run queue latency | `kube_pod_status_phase` pending duration |
+| Daemon liveness | pod readiness + daemon liveness probe |
+| Event-log DB pressure | RDS Performance Insights / postgres receiver |
+
+**This covers roughly 60% of real operational alerting.** Ship it before deciding whether the deeper layers are worth it.
+
+---
+
+## 3. L1 — Instrumenting Dagster's own processes
+
+All three long-lived components are ordinary Python processes, so standard OTel Python auto-instrumentation applies.
+
+### 3.1 Manual wrapper
+
+```bash
+pip install \
+  opentelemetry-distro \
+  opentelemetry-exporter-otlp \
+  opentelemetry-instrumentation-grpc \
+  opentelemetry-instrumentation-asgi \
+  opentelemetry-instrumentation-requests
+
+opentelemetry-bootstrap -a install   # auto-detects installed libs
+```
+
+| Component | Original command | With OTel |
+|---|---|---|
+| webserver | `dagster-webserver -h 0.0.0.0 -p 80` | `opentelemetry-instrument dagster-webserver -h 0.0.0.0 -p 80` |
+| daemon | `dagster-daemon run` | `opentelemetry-instrument dagster-daemon run` |
+| code server | `dagster api grpc -h 0.0.0.0 -p 3030 -m my_module` | `opentelemetry-instrument dagster api grpc ...` |
+
+What this buys you:
+
+- **webserver** — GraphQL/HTTP spans via ASGI instrumentation. Answers "why is Dagit slow", "which query is hammering Postgres".
+- **code server** — gRPC server spans. Shows daemon ↔ code-location latency and definitions-load time.
+- **daemon** — sensor/schedule ticks appear as gRPC *client* spans against code servers.
+
+> ⚠️ **Disable SQLAlchemy/psycopg2 instrumentation.** Dagster writes hundreds to thousands of event-log rows per run. Full DB span coverage will flood your trace backend, cost real money, and measurably slow runs down. Set `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=sqlalchemy,psycopg2` and only enable it temporarily when debugging DB issues.
+
+### 3.2 OTel Operator auto-injection (no Dockerfile CMD changes)
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: dagster-python
+  namespace: dagster
+spec:
+  exporter:
+    endpoint: http://otel-agent.observability:4318
+  propagators: [tracecontext, baggage]
+  sampler:
+    type: parentbased_traceidratio
+    argument: "0.1"
+  python:
+    env:
+      - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
+        value: "sqlalchemy,psycopg2"
+```
+
+Then annotate pods with `instrumentation.opentelemetry.io/inject-python: "dagster/dagster-python"`.
+
+⚠️ Injection works via a **mutating admission webhook on pod creation**. Dagster's **run pods are created at runtime by the K8sRunLauncher**, not by your Helm chart — so the annotation must go in `runLauncher.config.k8sRunLauncher.runK8sConfig.podTemplateSpecMetadata.annotations`. See §6.
+
+---
+
+## 4. L2 — Business-level spans in assets and ops
+
+This is the layer that answers "why was this asset slow today".
+
+### 4.1 Shared OTel bootstrap
+
+```python
+# my_project/observability/otel.py
+import os
+from functools import lru_cache
+
+from opentelemetry import trace, metrics
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+
+
+@lru_cache(maxsize=1)
+def init_otel() -> None:
+    """Idempotent per-process init.
+
+    Dagster's multiprocess executor forks/spawns child processes. A
+    TracerProvider set up in the parent is NOT usable in the child, so
+    every op needs to be able to call this cheaply. lru_cache makes it
+    a no-op after the first call within a given process.
+    """
+    resource = Resource.create({
+        "service.name": os.getenv("OTEL_SERVICE_NAME", "dagster"),
+        "service.namespace": "data-platform",
+        "deployment.environment": os.getenv("DEPLOYMENT_ENV", "dev"),
+    })
+
+    tp = TracerProvider(resource=resource)
+    tp.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(),           # reads OTEL_EXPORTER_OTLP_ENDPOINT
+        schedule_delay_millis=1000,   # short-lived step pods: flush aggressively
+    ))
+    trace.set_tracer_provider(tp)
+
+    mp = MeterProvider(
+        resource=resource,
+        metric_readers=[PeriodicExportingMetricReader(
+            OTLPMetricExporter(), export_interval_millis=5000
+        )],
+    )
+    metrics.set_meter_provider(mp)
+
+
+def get_tracer(name: str = "dagster"):
+    init_otel()
+    return trace.get_tracer(name)
+
+
+def force_flush(timeout_ms: int = 5000) -> None:
+    """MUST be called before an op returns. Otherwise a step pod that
+    exits in 3 seconds takes its unexported spans with it."""
+    tp = trace.get_tracer_provider()
+    if hasattr(tp, "force_flush"):
+        tp.force_flush(timeout_ms)
+    mp = metrics.get_meter_provider()
+    if hasattr(mp, "force_flush"):
+        mp.force_flush(timeout_ms)
+```
+
+### 4.2 Option A — `ConfigurableResource` (most idiomatic Dagster)
+
+```python
+# my_project/observability/resource.py
+from contextlib import contextmanager
+
+from dagster import ConfigurableResource, InitResourceContext
+from opentelemetry.trace import Status, StatusCode
+from pydantic import PrivateAttr
+
+from .otel import get_tracer, force_flush
+from .propagation import extract_parent_context
+
+
+class OTelResource(ConfigurableResource):
+    service_name: str = "dagster"
+    _tracer = PrivateAttr()
+
+    def setup_for_execution(self, context: InitResourceContext) -> None:
+        self._tracer = get_tracer(self.service_name)
+
+    def teardown_after_execution(self, context: InitResourceContext) -> None:
+        force_flush()
+
+    @contextmanager
+    def span(self, name: str, context, **attrs):
+        """`context` is an OpExecutionContext or AssetExecutionContext."""
+        parent = extract_parent_context(context.run.tags)   # ← see §5
+        with self._tracer.start_as_current_span(name, context=parent) as span:
+            span.set_attribute("dagster.run_id", context.run_id)
+            span.set_attribute("dagster.job_name", context.job_name)
+            if hasattr(context, "asset_key"):
+                span.set_attribute("dagster.asset_key", context.asset_key.to_user_string())
+            for k, v in attrs.items():
+                span.set_attribute(f"dagster.{k}", v)
+
+            # Log the trace id so you can jump from the Dagster UI to Tempo/Jaeger
+            sc = span.get_span_context()
+            context.log.info(f"otel trace_id={sc.trace_id:032x} span_id={sc.span_id:016x}")
+
+            try:
+                yield span
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                raise
+```
+
+Usage:
+
+```python
+from dagster import asset, Definitions
+
+@asset
+def customer_facts(context, otel: OTelResource, warehouse: SnowflakeResource):
+    with otel.span("extract", context) as span:
+        rows = warehouse.query("select * from raw.customers")
+        span.set_attribute("rows.extracted", len(rows))
+
+    with otel.span("transform", context):
+        result = transform(rows)
+
+    with otel.span("load", context, target="dim_customer"):
+        warehouse.write(result)
+
+
+defs = Definitions(
+    assets=[customer_facts],
+    resources={"otel": OTelResource(service_name="dagster-analytics")},
+)
+```
+
+### 4.3 Option B — decorator (wraps the whole asset, no body changes)
+
+```python
+# my_project/observability/decorator.py
+import functools
+
+from dagster import OpExecutionContext, AssetExecutionContext
+from opentelemetry.trace import Status, StatusCode
+
+from .otel import get_tracer, force_flush
+from .propagation import extract_parent_context
+
+
+def traced(span_name: str | None = None):
+    def deco(fn):
+        name = span_name or fn.__name__
+
+        @functools.wraps(fn)                 # required: Dagster inspects the signature
+        def wrapper(*args, **kwargs):
+            ctx = next(
+                (a for a in (*args, *kwargs.values())
+                 if isinstance(a, (OpExecutionContext, AssetExecutionContext))),
+                None,
+            )
+            tracer = get_tracer()
+            parent = extract_parent_context(ctx.run.tags) if ctx else None
+            with tracer.start_as_current_span(name, context=parent) as span:
+                if ctx:
+                    span.set_attribute("dagster.run_id", ctx.run_id)
+                    span.set_attribute("dagster.job_name", ctx.job_name)
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    span.record_exception(e)
+                    span.set_status(Status(StatusCode.ERROR, str(e)))
+                    raise
+                finally:
+                    force_flush(3000)
+        return wrapper
+    return deco
+```
+
+```python
+@asset          # @asset must be OUTERMOST
+@traced()
+def my_asset(context): ...
+```
+
+Order matters. `@asset` converts a function into an `AssetsDefinition`; if `@traced` sits outside it, it receives that object instead of a callable. `functools.wraps` preserves the signature so Dagster's dependency inference still works.
+
+### 4.4 Option C — hooks (lightest; success/failure signal only)
+
+```python
+from dagster import success_hook, failure_hook, HookContext, define_asset_job
+from opentelemetry import metrics
+from .otel import init_otel
+
+init_otel()
+_meter = metrics.get_meter("dagster.hooks")
+_op_counter = _meter.create_counter("dagster.op.executions")
+
+
+@success_hook
+def otel_success(context: HookContext):
+    _op_counter.add(1, {
+        "job_name": context.job_name,
+        "op_name": context.op.name,
+        "status": "success",
+    })   # note: no run_id — see the cardinality warning
+
+
+@failure_hook
+def otel_failure(context: HookContext):
+    _op_counter.add(1, {
+        "job_name": context.job_name,
+        "op_name": context.op.name,
+        "status": "failure",
+    })
+
+
+my_job = define_asset_job("my_job", selection="*", hooks={otel_success, otel_failure})
+```
+
+---
+
+## 5. Context propagation — the core problem, explained
+
+This is the section you actually need. Everything else is plumbing.
+
+### 5.1 What "context" means in OpenTelemetry
+
+The word is overloaded. In OTel it means one specific thing: **an immutable key-value map that travels alongside your execution, carrying the identity of the currently-active span.**
+
+The critical payload inside it is the **SpanContext**:
+
+| Field | Size | Meaning |
+|---|---|---|
+| `trace_id` | 16 bytes | Identifies the entire distributed operation. Every span in one trace shares it. |
+| `span_id` | 8 bytes | Identifies *this* span. Becomes the `parent_span_id` of anything started under it. |
+| `trace_flags` | 1 byte | Sampling decision (bit 0 = sampled). |
+| `trace_state` | string | Vendor-specific key-value data. |
+
+That's it. Four fields. **A trace is not a data structure that lives anywhere** — it's reassembled by the backend after the fact, by grouping spans that share a `trace_id` and linking them via `parent_span_id`. Your job at runtime is only ever: *make sure the child span knows its parent's `trace_id` and `span_id`.*
+
+### 5.2 How Python normally handles it — and why it breaks
+
+In-process, OTel Python stores the active context in a **`contextvars.ContextVar`**. When you write:
+
+```python
+with tracer.start_as_current_span("parent"):
+    with tracer.start_as_current_span("child"):   # implicitly reads the ContextVar
+        ...
+```
+
+`start_as_current_span` sets the ContextVar on entry and restores it on exit. The child looks it up, finds "parent", and records `parent_span_id = parent.span_id`. This is why nested spans "just work" and why you almost never think about context.
+
+A `ContextVar` is scoped to **one thread in one process**. It propagates across `async`/`await` and (with care) across threads. It does **not** survive:
+
+- `os.fork()` — a forked child gets a *copy* frozen at fork time, and more importantly the parent's `BatchSpanProcessor` background thread does not exist in the child
+- `subprocess` / new interpreter — nothing carries over
+- **a network boundary** — obviously
+- **a new Kubernetes pod** — obviously
+
+Dagster's run architecture crosses the last two on every single run.
+
+### 5.3 The three boundaries in a Dagster run
+
+```
+┌─ dagster-daemon ───────────────────────────────────────────┐
+│  sensor tick → span "sensor.s3_arrival"                    │
+│  trace_id = abc123..., span_id = 1111                      │
+│  yields RunRequest → run created in Postgres               │
+└────────────────────────────┬───────────────────────────────┘
+                             │  ◄── BOUNDARY 1: new pod, new process
+┌─ Run Pod (K8s Job) ────────▼───────────────────────────────┐
+│  loads the run record, plans steps                         │
+│  ContextVar is empty. No knowledge of trace abc123.        │
+└────────────────────────────┬───────────────────────────────┘
+                             │  ◄── BOUNDARY 2: k8s_job_executor, new pod per step
+┌─ Step Pod ─────────────────▼───────────────────────────────┐
+│  executes one asset                                        │
+│  ContextVar is empty. Again.                               │
+└────────────────────────────────────────────────────────────┘
+```
+
+Without intervention you get three unrelated traces instead of one, and you can never answer "which sensor tick caused this failed asset materialization".
+
+### 5.4 The standard OTel answer: serialize, transport, deserialize
+
+OTel's solution for network boundaries is the **W3C Trace Context** spec. A `SpanContext` is serialized into a single ASCII string called `traceparent`:
+
+```
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             │  │                                │                │
+             │  │                                │                └─ flags: 01 = sampled
+             │  │                                └─ parent span id (8 bytes hex)
+             │  └─ trace id (16 bytes hex)
+             └─ version
+```
+
+For HTTP this goes in a header and instrumentation libraries handle it automatically. The generic API is the **propagator**, which works over any `dict[str, str]` — OTel calls that dict a **carrier**:
+
+```python
+propagator.inject(carrier)                # SpanContext  → carrier dict
+parent_ctx = propagator.extract(carrier)  # carrier dict → Context
+```
+
+So the whole problem reduces to: **find any channel that carries a small dict from where the run is created to where it executes.**
+
+### 5.5 The carrier for Dagster: run tags
+
+Dagster gives you exactly one such channel: **run tags**.
+
+Run tags are a `dict[str, str]` that you attach to a `RunRequest`. Dagster persists them on the run record in Postgres. Both the run pod and every step pod load that run record on startup, so `context.run.tags` is readable from anywhere in the execution graph. They're already used for things like `dagster/priority` and K8s config overrides — you're just adding two keys.
+
+**Why not the alternatives:**
+
+| Candidate | Why it fails |
+|---|---|
+| Environment variables | Set at pod creation. You'd have to inject per-run env into the launcher, which is possible but fights the framework and doesn't reach step pods cleanly. |
+| `run_config` | Works, but pollutes your config schema and every op signature. Tags are metadata; config is behaviour. |
+| Dagster `Output` metadata | Only flows downstream between ops. Doesn't reach the first op, and doesn't come from the daemon. |
+| A side-channel (Redis, etc.) | Extra infrastructure to keep alive for 60 bytes of data. |
+
+Run tags are the right answer: string-keyed, persisted, universally readable, and semantically "metadata about this run".
+
+### 5.6 Implementation
+
+```python
+# my_project/observability/propagation.py
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+_PROP = TraceContextTextMapPropagator()
+
+TRACEPARENT_TAG = "otel/traceparent"
+TRACESTATE_TAG = "otel/tracestate"
+
+
+def inject_into_tags() -> dict[str, str]:
+    """Call from a sensor/schedule, INSIDE an active span.
+
+    Serializes the currently-active SpanContext into run tags. If no span
+    is active, returns {} and downstream spans become trace roots.
+    """
+    carrier: dict[str, str] = {}
+    _PROP.inject(carrier)          # reads the ambient ContextVar
+    tags = {}
+    if "traceparent" in carrier:
+        tags[TRACEPARENT_TAG] = carrier["traceparent"]
+    if "tracestate" in carrier:
+        tags[TRACESTATE_TAG] = carrier["tracestate"]
+    return tags
+
+
+def extract_parent_context(run_tags: dict[str, str]):
+    """Call from an op/asset. Rebuilds the parent Context from run tags.
+
+    Returns None when the run was triggered manually (no tags) — the caller
+    then starts a root span, which is correct behaviour, not an error.
+    """
+    carrier = {}
+    if TRACEPARENT_TAG in run_tags:
+        carrier["traceparent"] = run_tags[TRACEPARENT_TAG]
+    if TRACESTATE_TAG in run_tags:
+        carrier["tracestate"] = run_tags[TRACESTATE_TAG]
+    if not carrier:
+        return None
+    return _PROP.extract(carrier)
+```
+
+⚠️ Use the `otel/` prefix, not `dagster/`. The `dagster/` namespace is reserved and Dagster will reject or ignore custom keys in it.
+
+Sensor side — inject:
+
+```python
+from dagster import sensor, RunRequest, SensorEvaluationContext
+from .otel import get_tracer
+from .propagation import inject_into_tags
+
+
+@sensor(job=my_job, minimum_interval_seconds=30)
+def s3_arrival_sensor(context: SensorEvaluationContext):
+    tracer = get_tracer("dagster.sensor")
+    with tracer.start_as_current_span("sensor.s3_arrival") as span:
+        new_files = check_s3()
+        span.set_attribute("files.found", len(new_files))
+
+        # Compute tags INSIDE the with-block: inject() reads the ambient
+        # ContextVar, which is only populated while the span is current.
+        tags = inject_into_tags()
+
+        for f in new_files:
+            yield RunRequest(run_key=f, tags={**tags, "source_file": f})
+```
+
+⚠️ Sensors are generators. The `with` block's exit timing relative to `yield` is not what you'd intuitively expect — Dagster may suspend the generator between yields. Always call `inject_into_tags()` eagerly inside the span and reuse the result, rather than calling it per-yield.
+
+Asset side — extract (already shown in §4.2/§4.3):
+
+```python
+parent = extract_parent_context(context.run.tags)
+with tracer.start_as_current_span("asset.foo", context=parent) as span:
+    ...
+```
+
+The same call works in **both** the run pod and step pods, because both load the run record. Boundary 1 and boundary 2 are solved by the identical line of code.
+
+### 5.7 Resulting trace
+
+```
+sensor.s3_arrival                    [dagster-daemon]     trace_id=abc123
+├── asset.raw_events                 [step pod A]         trace_id=abc123, parent=sensor
+├── asset.enriched_events            [step pod B]         trace_id=abc123, parent=sensor
+│   ├── extract                                           parent=asset.enriched_events
+│   ├── transform
+│   └── load
+└── asset.daily_rollup               [step pod C]         trace_id=abc123, parent=sensor
+```
+
+Note there is no intermediate `run.my_job` span. Dagster offers no clean run-level hook to wrap execution, and adding one isn't worth the complexity — the backend groups by `trace_id` anyway, so the visual result is the same. If you really want it, emit a zero-duration span from a `run_status_sensor` with explicit `links` instead of trying to wrap the run pod.
+
+### 5.8 Sampling interacts with this
+
+The sampling decision lives in `trace_flags` and rides along in the `traceparent`. That means:
+
+- Set the **daemon** to `OTEL_TRACES_SAMPLER=always_on`. It's the trace root; if it samples away, the whole run's trace disappears.
+- Set run/step pods to `parentbased_traceidratio`. They inherit the daemon's decision rather than making a conflicting one, which is what keeps traces whole instead of half-sampled.
+- Manually-triggered runs have no parent, so they fall back to the ratio. Expect partial coverage there — that's normal.
+
+---
+
+## 6. Helm values for the EKS deployment
+
+The official chart has **four** places that need environment variables. Missing any one produces a blind spot.
+
+```yaml
+# usw2sandbox-values.yaml
+
+# ---------- 1. Webserver ----------
+dagsterWebserver:
+  env:
+    - name: OTEL_SERVICE_NAME
+      value: dagster-webserver
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://otel-agent.observability.svc.cluster.local:4317
+    - name: OTEL_EXPORTER_OTLP_PROTOCOL
+      value: grpc
+    - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
+      value: sqlalchemy,psycopg2
+    - name: OTEL_TRACES_SAMPLER
+      value: parentbased_traceidratio
+    - name: OTEL_TRACES_SAMPLER_ARG
+      value: "0.1"
+    - name: OTEL_RESOURCE_ATTRIBUTES
+      value: deployment.environment=sandbox,service.namespace=data-platform
+
+# ---------- 2. Daemon (sensors and run_status_sensors execute here) ----------
+dagsterDaemon:
+  env:
+    - name: OTEL_SERVICE_NAME
+      value: dagster-daemon
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://otel-agent.observability.svc.cluster.local:4317
+    - name: OTEL_TRACES_SAMPLER
+      value: always_on            # trace root — never sample this away
+    - name: OTEL_RESOURCE_ATTRIBUTES
+      value: deployment.environment=sandbox
+
+# ---------- 3. Code locations (gRPC servers) ----------
+dagster-user-deployments:
+  enabled: true
+  deployments:
+    - name: analytics
+      image:
+        repository: <registry>/analytics
+        tag: "..."
+      dagsterApiGrpcArgs: ["--module-name", "analytics.definitions"]
+      port: 3030
+      env:
+        - name: OTEL_SERVICE_NAME
+          value: dagster-code-analytics
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel-agent.observability.svc.cluster.local:4317
+
+# ---------- 4. Run pods (most commonly missed) ----------
+runLauncher:
+  type: K8sRunLauncher
+  config:
+    k8sRunLauncher:
+      envVars:                     # NOTE: plain KEY=VALUE strings only
+        - "OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-agent.observability.svc.cluster.local:4317"
+        - "OTEL_EXPORTER_OTLP_PROTOCOL=grpc"
+        - "OTEL_SERVICE_NAME=dagster-run"
+        - "OTEL_BSP_SCHEDULE_DELAY=1000"
+        - "OTEL_METRIC_EXPORT_INTERVAL=5000"
+        - "OTEL_TRACES_SAMPLER=parentbased_traceidratio"
+      envConfigMaps:
+        - name: otel-config        # cleaner when you have many code locations
+      runK8sConfig:
+        podTemplateSpecMetadata:
+          annotations:
+            instrumentation.opentelemetry.io/inject-python: "dagster/dagster-python"
+        podSpecConfig:
+          terminationGracePeriodSeconds: 30   # room for the final span flush
+```
+
+Pointing at the node-local agent instead of the Service avoids a cross-node hop, but `envVars` only accepts literal strings — no `valueFrom`. Use `runK8sConfig.containerConfig.env` for that:
+
+```yaml
+runK8sConfig:
+  containerConfig:
+    env:
+      - name: NODE_IP
+        valueFrom:
+          fieldRef: { fieldPath: status.hostIP }
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://$(NODE_IP):4317"
+```
+
+---
+
+## 7. L3 — Run-level metrics from the event log
+
+Some things are only knowable after the fact: queue time, retry counts, materialization freshness. `run_status_sensor` is the hook.
+
+```python
+from dagster import (
+    run_status_sensor, RunStatusSensorContext,
+    DagsterRunStatus, DefaultSensorStatus,
+)
+from opentelemetry import metrics
+from .otel import init_otel
+
+init_otel()
+_meter = metrics.get_meter("dagster.runs")
+
+_runs      = _meter.create_counter("dagster.run.completed")
+_run_dur   = _meter.create_histogram("dagster.run.duration", unit="s")
+_queue_dur = _meter.create_histogram("dagster.run.queue_duration", unit="s")
+
+
+def _emit(context: RunStatusSensorContext, status: str):
+    run = context.dagster_run
+    stats = context.instance.get_run_stats(run.run_id)
+    labels = {
+        "job_name": run.job_name,
+        "status": status,
+        "code_location": (
+            run.external_job_origin.location_name
+            if run.external_job_origin else "unknown"
+        ),
+    }
+    _runs.add(1, labels)
+    if stats.start_time and stats.end_time:
+        _run_dur.record(stats.end_time - stats.start_time, labels)
+    if stats.enqueued_time and stats.launch_time:
+        _queue_dur.record(stats.launch_time - stats.enqueued_time, labels)
+
+
+@run_status_sensor(run_status=DagsterRunStatus.SUCCESS,
+                   default_status=DefaultSensorStatus.RUNNING)
+def on_success(context): _emit(context, "success")
+
+
+@run_status_sensor(run_status=DagsterRunStatus.FAILURE,
+                   default_status=DefaultSensorStatus.RUNNING)
+def on_failure(context): _emit(context, "failure")
+
+
+@run_status_sensor(run_status=DagsterRunStatus.CANCELED,
+                   default_status=DefaultSensorStatus.RUNNING)
+def on_cancel(context): _emit(context, "canceled")
+```
+
+> These sensors run **in the daemon process**, so the daemon image needs the OTel dependencies and a working `OTEL_EXPORTER_OTLP_ENDPOINT`.
+>
+> Sensors are tick-driven (30s default). Metrics lag, and events can be missed across daemon restarts. If you need strict accuracy for alerting, prefer the kube-state-metrics path from §2.3 and use these for analytics.
+
+### Recommended metric set
+
+| Metric | Type | Labels (**never `run_id`**) |
+|---|---|---|
+| `dagster.run.completed` | Counter | job_name, status, code_location |
+| `dagster.run.duration` | Histogram | job_name, code_location |
+| `dagster.run.queue_duration` | Histogram | job_name |
+| `dagster.run.in_progress` | UpDownCounter | code_location |
+| `dagster.op.duration` | Histogram | job_name, op_name |
+| `dagster.asset.materialization` | Counter | asset_key, status |
+| `dagster.asset.rows_written` | Histogram | asset_key |
+| `dagster.sensor.tick` | Counter | sensor_name, status |
+| `dagster.step.retries` | Counter | job_name, op_name |
+
+---
+
+## 8. Gotchas
+
+| # | Problem | Symptom | Fix |
+|---|---|---|---|
+| 1 | Short-lived step pods drop spans | Asset spans randomly missing | `force_flush()` at op end; `OTEL_BSP_SCHEDULE_DELAY=1000`; `terminationGracePeriodSeconds: 30` |
+| 2 | Multiprocess executor forks | Only the first op emits spans | Call the `lru_cache`d `init_otel()` inside each op, not at module import |
+| 3 | `run_id` as a metric label | Prometheus/Mimir OOM, backend bill spikes | run_id on spans only; strip from metrics in the Collector |
+| 4 | SQLAlchemy spans flood everything | 5000+ spans per run | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=sqlalchemy,psycopg2` |
+| 5 | Run pods have no OTel env | Daemon/webserver traced, runs completely dark | Run pods do **not** inherit chart-level env — configure `runLauncher.config.k8sRunLauncher.envVars` separately |
+| 6 | Operator injection misses run pods | Annotation set but nothing injected | Run pods are created at runtime — annotate via `runK8sConfig.podTemplateSpecMetadata` |
+| 7 | Manually-triggered runs are orphan traces | Some traces have no sensor parent | Expected. `extract_parent_context` returns `None` and you get a root span |
+| 8 | `dagster/` tag prefix rejected | Tag write fails or is dropped | Reserved namespace — use `otel/traceparent` |
+| 9 | `inject_into_tags()` returns `{}` in a sensor | Traces never link up | Generator suspension — call it inside the span, before yielding, and reuse the result |
+| 10 | Half-sampled traces | Trace exists but is missing branches | Daemon `always_on`, everything downstream `parentbased_traceidratio` |
+| 11 | OTLP port confusion | Silent data loss | gRPC = 4317 (bare endpoint); HTTP = 4318 (SDK appends `/v1/traces`) |
+| 12 | `context.run.tags` missing on asset checks | AttributeError | Asset check contexts differ — guard with `hasattr` |
+
+---
+
+## 9. Phased rollout
+
+Mapped to the current MVP state (official chart, real RDS + S3, public example image, custom image push still blocked):
+
+**Phase 0 — available now, zero Dagster changes**
+- Deploy the OTel Collector (Operator or ADOT)
+- Wire up kube-state-metrics and kubelet metrics
+- Dashboards: run success rate, pod pending duration, OOMKills, daemon liveness
+- Independent of the image-push blocker
+
+**Phase 1 — once custom images can ship**
+- Add OTel deps to the image; wrap webserver / daemon / code servers with `opentelemetry-instrument`
+- Disable SQLAlchemy instrumentation
+- GraphQL and gRPC layer traces
+
+**Phase 2 — once real pipeline code exists**
+- Add `OTelResource` and/or `@traced`
+- Implement run-tag context propagation
+- End-to-end sensor → run → asset traces
+
+**Phase 3 — production**
+- `run_status_sensor` metrics
+- SLOs and alerting off metrics (not traces)
+- Tail sampling: keep 100% of failed and slow runs, sample the rest
+
+---
+
+## 10. References
+
+- Dagster OTel feature requests (still open): [#11191](https://github.com/dagster-io/dagster/issues/11191), [#12353](https://github.com/dagster-io/dagster/issues/12353)
+- Dagster monitoring discussion: [discussions/7221](https://github.com/dagster-io/dagster/discussions/7221)
+- W3C Trace Context spec: https://www.w3.org/TR/trace-context/
+- OpenTelemetry Python: https://opentelemetry.io/docs/languages/python/
+- OpenTelemetry Operator: https://github.com/open-telemetry/opentelemetry-operator
+- OTel Registry: https://opentelemetry.io/ecosystem/registry/
+- Dagster "telemetry" (usage stats — **not** observability): https://docs.dagster.io/about/telemetry
