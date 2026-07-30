@@ -1,0 +1,163 @@
+# Per-Workspace IAM for Dagster on EKS
+
+## What "per-workspace IAM" means
+
+In Dagster OSS, a *workspace* is the set of **code locations** loaded by the webserver
+and daemon. One code location ≈ one project: its own repo, its own image, its own
+dependency set.
+
+Per-workspace IAM means each code location runs under its **own AWS identity** instead
+of every project sharing the node role or a single cluster-wide service account.
+
+| Without | With |
+| --- | --- |
+| One role for all runs | One role per project |
+| Any op can read any bucket | Team A reads `s3://team-a/*`, nothing else |
+| Blast radius = cluster | Blast radius = project |
+
+## The thing that trips people up
+
+A code location is **not one pod**. Three pod types are involved, and IAM has to follow
+all of them:
+
+1. **Code server pod** — long-lived gRPC deployment that serves definitions.
+2. **Run pod** — created per run by `K8sRunLauncher`.
+3. **Step pods** — created per step, only if using `k8s_job_executor`.
+
+Actual data access (IO managers, S3 reads/writes, Secrets Manager, Redshift, etc.)
+happens in **run and step pods**, not the code server. Annotating only the code server
+service account gives isolation on paper and none in practice.
+
+Step pods inherit their pod spec from the run pod, so the real requirement is:
+**run pods must carry the project's service account.**
+
+## How to achieve it
+
+Fits the existing two-chart pattern: platform chart (webserver, daemon, run launcher
+defaults) + per-project code location chart, both driven by ArgoCD ApplicationSets.
+
+### 1. One IAM role per project
+
+Trust the specific service account, not the namespace.
+
+- **IRSA** — trust policy conditions on the cluster OIDC provider:
+  `sub = system:serviceaccount:<namespace>:dagster-<project>`
+- **EKS Pod Identity** — create a pod identity association mapping
+  `(cluster, namespace, serviceAccount) -> roleArn`. No OIDC condition string to
+  hand-maintain per role; preferred where available.
+
+Keep the policy scoped: project bucket prefix, project secrets path, project KMS key.
+
+### 2. Service account in the per-project chart
+
+```yaml
+# templates/serviceaccount.yaml (per-project code location chart)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dagster-{{ .Values.project.name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # IRSA only; omit when using Pod Identity
+    eks.amazonaws.com/role-arn: {{ .Values.project.iamRoleArn }}
+```
+
+Set it on the code server deployment:
+
+```yaml
+spec:
+  template:
+    spec:
+      serviceAccountName: dagster-{{ .Values.project.name }}
+```
+
+### 3. Propagate to run pods — the load-bearing setting
+
+```yaml
+dagster-user-deployments:
+  deployments:
+    - name: {{ .Values.project.name }}
+      image: ...
+      includeConfigInLaunchedRuns:
+        enabled: true
+```
+
+`includeConfigInLaunchedRuns` copies the code server's pod spec — service account,
+env, envSecrets, labels, image pull secrets — onto launched run pods.
+
+**If this is false**, run pods fall back to the platform chart's
+`runLauncher.config.k8sRunLauncher.serviceAccountName`, and every project shares one
+role again. This is the single most common way per-workspace IAM silently fails.
+
+### 4. Step pods
+
+Inherit from the run pod. No extra config unless a specific op needs a different
+identity, in which case override per-op:
+
+```python
+@op(tags={"dagster-k8s/config": {
+    "pod_spec_config": {"service_account_name": "dagster-<project>-elevated"}
+}})
+def privileged_op(): ...
+```
+
+### 5. Wire it into the ApplicationSet
+
+Drive `project.name`, `project.iamRoleArn`, and the service account name from the same
+per-env values file that already triggers deployment. Adding a project should be one
+file in the helm-charts repo, not three coordinated edits.
+
+```yaml
+# usw2sandbox-values.yaml
+project:
+  name: team-a
+  iamRoleArn: arn:aws:iam::<acct>:role/dagster-team-a-usw2sandbox
+```
+
+## Design decisions to settle before building
+
+### Shared infrastructure breaks pure isolation
+
+These are touched by every project and need deliberate handling:
+
+- **Compute log manager bucket** — either grant each role a prefix-scoped write
+  (`s3://dagster-logs/<project>/*`) or accept a shared path and document it.
+- **RDS / instance storage** — the run pod talks to the Dagster instance DB. That
+  credential is platform-level, not project-level.
+- **Registry pull creds** (ECR / JFrog) — image pull secrets, not IAM; propagated via
+  the same `includeConfigInLaunchedRuns` mechanism.
+
+### Namespace strategy
+
+| Option | Isolation | Cost |
+| --- | --- | --- |
+| Single namespace, one SA per project | IAM boundary only | Low — recommended for MVP |
+| Namespace per project | IAM + K8s RBAC + quota | Daemon needs Role/RoleBinding in each namespace; per-location `namespace` config |
+
+Start with single namespace. The IAM boundary is the valuable half and it does not
+require the RBAC work.
+
+### IAM vs K8s RBAC
+
+Do not conflate them in the writeup:
+
+- **K8s RBAC** — the daemon's permission to create Jobs/Pods for runs.
+- **AWS IAM** — what the workload can reach in AWS once running.
+
+Per-workspace IAM changes the second. The first stays platform-owned.
+
+## Verification
+
+```bash
+# confirm the run pod actually got the project SA
+kubectl get pod <run-pod> -o jsonpath='{.spec.serviceAccountName}'
+
+# confirm the identity inside the pod
+kubectl exec <run-pod> -- aws sts get-caller-identity
+
+# negative test — the point of the exercise
+kubectl exec <run-pod> -- aws s3 ls s3://<other-team-bucket>/   # expect AccessDenied
+```
+
+The negative test is the one that matters. A passing positive test only proves
+credentials exist, not that they are scoped.
